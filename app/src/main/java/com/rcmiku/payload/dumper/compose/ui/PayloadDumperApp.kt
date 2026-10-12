@@ -1,6 +1,7 @@
 package com.rcmiku.payload.dumper.compose.ui
 
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -23,6 +24,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.CardDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -48,15 +50,13 @@ import com.rcmiku.payload.dumper.compose.ui.component.InputDialog
 import com.rcmiku.payload.dumper.compose.ui.component.InputInfoCard
 import com.rcmiku.payload.dumper.compose.ui.component.PartitionDialog
 import com.rcmiku.payload.dumper.compose.ui.component.PartitionInfoItem
-import com.rcmiku.payload.dumper.compose.ui.component.RequestPermissionDialog
 import com.rcmiku.payload.dumper.compose.ui.component.RomInfoCard
 import com.rcmiku.payload.dumper.compose.utils.AppContextUtil
-import com.rcmiku.payload.dumper.compose.utils.DumpUtil
 import com.rcmiku.payload.dumper.compose.utils.MiscUtil.getItemShape
-import com.rcmiku.payload.dumper.compose.utils.MiscUtil.getRealPathFromUri
-import com.rcmiku.payload.dumper.compose.utils.MiscUtil.isManageExternalStoragePermissionGranted
+import com.rcmiku.payload.dumper.compose.utils.OutputTreeHolder
 import com.rcmiku.payload.dumper.compose.utils.ParseUtil
 import com.rcmiku.payload.dumper.compose.utils.PreferencesUtil
+import com.rcmiku.payload.dumper.compose.utils.SafUtil
 import com.rcmiku.payload.dumper.compose.viewModel.PayloadDumperViewModel
 import dev.chrisbanes.haze.ExperimentalHazeApi
 import dev.chrisbanes.haze.HazeEffectScope
@@ -121,35 +121,54 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
     val showInputDialog = remember { mutableStateOf(false) }
     val showCustomUserAgentDialog = remember { mutableStateOf(false) }
     val showAboutDialog = remember { mutableStateOf(false) }
-    val showRequestPermissionDialog = remember { mutableStateOf(false) }
     var expanded by rememberSaveable { mutableStateOf(false) }
     val showTopPopup = rememberSaveable { mutableStateOf(false) }
     val isTopPopupExpanded = rememberSaveable { mutableStateOf(false) }
     val dropdownOptions = stringArrayResource(R.array.dropdownOptions)
     val searchValue = viewModel.search.collectAsState()
 
+    // Pick an OTA ZIP / payload.bin via SAF and remember the content Uri directly (no all-files
+    // access needed).
     val launcher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent(),
+        contract = ActivityResultContracts.OpenDocument(),
         onResult = { uri: Uri? ->
             uri?.let {
-                getRealPathFromUri(context = AppContextUtil.context, uri)?.let { path ->
-                    pathOrUrl.value = path
-                    PreferencesUtil().perfSet("pathOrUrl", path)
+                val flags = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                runCatching {
+                    AppContextUtil.context.contentResolver.takePersistableUriPermission(it, flags)
                 }
+                pathOrUrl.value = it.toString()
+                PreferencesUtil().perfSet("pathOrUrl", pathOrUrl.value)
             }
         }
     )
 
+    // Choose the destination folder for dumped images via SAF. Persist read/write access so it
+    // survives app restarts. The picker opens at the current folder, or the public Download root
+    // by default.
     val folderPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
         uri?.let {
-            getRealPathFromUri(context = AppContextUtil.context, uri)?.let { path ->
-                PreferencesUtil().perfSet(
-                    "customFolder",
-                    path
-                )
+            val flags = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            runCatching {
+                AppContextUtil.context.contentResolver.takePersistableUriPermission(it, flags)
             }
+            viewModel.setOutputTreeUri(it)
+            OutputTreeHolder.save(it)
+        }
+    }
+
+    // First use (or a revoked/lost grant): guide the user to authorise the default Download folder.
+    LaunchedEffect(Unit) {
+        if (viewModel.outputTreeUri() == null) {
+            Toast.makeText(
+                AppContextUtil.context,
+                AppContextUtil.context.getString(R.string.select_output_folder),
+                Toast.LENGTH_LONG
+            ).show()
+            folderPickerLauncher.launch(SafUtil.downloadsTreeUri())
         }
     }
 
@@ -185,13 +204,9 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                                             isTopPopupExpanded.value = false
                                             when (index) {
                                                 0 -> showCustomUserAgentDialog.value = true
-                                                1 -> {
-                                                    if (isManageExternalStoragePermissionGranted())
-                                                        folderPickerLauncher.launch(null)
-                                                    else
-                                                        showRequestPermissionDialog.value = true
-                                                }
-
+                                                1 -> folderPickerLauncher.launch(
+                                                    viewModel.outputTreeUri() ?: SafUtil.downloadsTreeUri()
+                                                )
                                                 2 -> showAboutDialog.value = true
                                             }
                                         },
@@ -308,10 +323,7 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                                 },
                                 title = stringResource(R.string.from_local),
                                 onClick = {
-                                    if (isManageExternalStoragePermissionGranted())
-                                        launcher.launch("application/zip")
-                                    else
-                                        showRequestPermissionDialog.value = true
+                                    launcher.launch(arrayOf("application/zip", "application/octet-stream"))
                                 }
                             )
                             SuperArrow(
@@ -347,9 +359,9 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                                 text = stringResource(R.string.parse),
                                 onClick = {
                                     coroutineScope.launch {
-                                        ParseUtil().parse(
+                                        ParseUtil.loadPayload(
                                             pathOrUrl = pathOrUrl.value,
-                                            onSuccess = { payloadTemp ->
+                                            onParsed = { payloadTemp ->
                                                 viewModel.initPayloadDumper(payload = payloadTemp)
                                                 focusManager.clearFocus()
                                                 keyboardController?.hide()
@@ -391,27 +403,10 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                             showDialog.value = true
                         },
                         onDownload = {
-                            viewModel.updateDownloadState(
-                                partitionName = partitionInfo.partitionName,
-                                true
-                            )
-                            coroutineScope.launch {
-                                DumpUtil().dump(
-                                    partitionName = partitionInfo.partitionName,
-                                    payload = payload.value!!,
-                                    isPath = payload.value!!.isPath,
-                                    onProgressUpdate = { progress ->
-                                        viewModel.updateProgress(
-                                            partitionName = partitionInfo.partitionName,
-                                            progress = progress / partitionInfo.size.toFloat()
-                                        )
-                                    }, onFailure = { isDownload ->
-                                        viewModel.updateDownloadState(
-                                            partitionName = partitionInfo.partitionName,
-                                            isDownload
-                                        )
-                                    })
-                            }
+                            viewModel.startDump(partitionInfo.partitionName)
+                        },
+                        onCancel = {
+                            viewModel.cancelDump(partitionInfo.partitionName)
                         })
                 }
             }
@@ -420,6 +415,5 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
     InputDialog(showInputDialog, pathOrUrl)
     CustomUserAgent(showCustomUserAgentDialog)
     AboutDialog(showAboutDialog)
-    RequestPermissionDialog(showRequestPermissionDialog)
     selectedPartitionInfo.value?.let { PartitionDialog(showDialog, it) }
 }

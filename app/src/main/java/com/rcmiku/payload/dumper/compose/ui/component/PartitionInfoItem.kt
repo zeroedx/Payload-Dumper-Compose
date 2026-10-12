@@ -25,12 +25,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.rcmiku.payload.dumper.compose.R
 import com.rcmiku.payload.dumper.compose.model.PartitionInfo
+import com.rcmiku.payload.dumper.compose.model.VerifyState
 import com.rcmiku.payload.dumper.compose.utils.MiscUtil.sizeIn
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 @Composable
-fun PartitionInfoItem(partitionInfo: PartitionInfo, onClick: () -> Unit, onDownload: () -> Unit) {
+fun PartitionInfoItem(
+    partitionInfo: PartitionInfo,
+    onClick: () -> Unit,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit = {},
+) {
 
     Row(
         modifier = Modifier
@@ -69,6 +75,7 @@ fun PartitionInfoItem(partitionInfo: PartitionInfo, onClick: () -> Unit, onDownl
                     .height(30.dp)
                     .width(60.dp)
                     .align(Alignment.CenterVertically)
+                    .clickable(onClick = onCancel)
             ) {
                 CircularProgressIndicator(
                     progress = { partitionInfo.progress },
@@ -77,6 +84,21 @@ fun PartitionInfoItem(partitionInfo: PartitionInfo, onClick: () -> Unit, onDownl
                         .align(Alignment.Center),
                     color = MiuixTheme.colorScheme.primary,
                     trackColor = MiuixTheme.colorScheme.tertiaryContainerVariant,
+                )
+            }
+        } else if (partitionInfo.verifyState == VerifyState.Failed) {
+            Badge(
+                modifier = Modifier
+                    .height(30.dp)
+                    .width(60.dp)
+                    .align(Alignment.CenterVertically),
+                containerColor = MiuixTheme.colorScheme.onPrimaryVariant
+            ) {
+                Text(
+                    text = stringResource(R.string.verify_fail_message),
+                    style = MiuixTheme.textStyles.subtitle,
+                    color = MiuixTheme.colorScheme.primaryVariant,
+                    fontWeight = FontWeight.SemiBold
                 )
             }
         } else if (!partitionInfo.isDownloading) {

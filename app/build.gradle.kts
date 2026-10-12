@@ -15,18 +15,28 @@ android {
         applicationId = "com.rcmiku.payload.dumper.compose"
         minSdk = 30
         targetSdk = 35
-        versionCode = 15
-        versionName = "1.5"
+        versionCode = 16
+        versionName = "1.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
-        register("release") {
-            enableV1Signing = true
-            enableV2Signing = true
-            enableV3Signing = true
-            enableV4Signing = true
+        create("release") {
+            // Keystore is intentionally NOT stored in the repository. Provide it via
+            // environment variables (e.g. CI secrets) when a signed release is required.
+            // Without them the release APK is packaged unsigned.
+            val storePath = System.getenv("RELEASE_STORE_FILE")
+            if (!storePath.isNullOrBlank()) {
+                storeFile = file(storePath)
+                storePassword = System.getenv("RELEASE_STORE_PASSWORD")
+                keyAlias = System.getenv("RELEASE_KEY_ALIAS")
+                keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+                enableV4Signing = true
+            }
         }
     }
 
@@ -38,7 +48,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.findByName("release")
+            // Only attach a signing config when a keystore was actually provided.
+            signingConfigs.getByName("release").takeIf { it.storeFile != null }?.let {
+                signingConfig = it
+            }
         }
         debug {
             applicationIdSuffix = ".debug"
@@ -57,6 +70,9 @@ android {
     }
     androidResources {
         generateLocaleConfig = true
+    }
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
     }
 }
 
@@ -96,6 +112,9 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.accompanist.drawablepainter)
     testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.okhttp.mockwebserver)
+    testImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))

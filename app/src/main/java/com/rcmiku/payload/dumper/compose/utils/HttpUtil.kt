@@ -6,19 +6,26 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.Headers
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.ResponseBody
 import java.io.IOException
-import java.net.URI
-import java.nio.file.Paths
+import java.io.InputStream
 import java.util.concurrent.TimeUnit
 
-object HttpUtil {
+object HttpUtil : SeekableInput {
+
+    override val isLocal: Boolean = false
 
     private lateinit var url: String
     private lateinit var fileName: String
+
+    /** Display name of the remote resource. */
+    val name: String
+        get() = fileName
+
     private var fileLength: Long = 0
 
     @Volatile
@@ -48,37 +55,36 @@ object HttpUtil {
     suspend fun init(link: String) = withContext(Dispatchers.IO) {
         url = link
         cancelled = false
-        runCatching {
-            val request = Request.Builder()
-                .url(link)
-                .addHeader("Range", "bytes=0-0")
-                .build()
+        val request = Request.Builder()
+            .url(link)
+            .addHeader("Range", "bytes=0-0")
+            .build()
 
-            client.newCall(request).execute().use { response ->
-                if (response.isSuccessful) {
-                    val contentRange = response.header("Content-Range")
-                    fileLength = contentRange?.split("/")?.get(1)?.toLong() ?: 0L
-                    fileName = getFileNameFromHeaders(response.headers)
-                } else {
-                    throw IOException("Failed to initialize HTTP request: ${response.message}")
-                }
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw IOException("Failed to initialize HTTP request: ${response.code} ${response.message}")
             }
-        }.onFailure { exception ->
-            throw IOException("Failed to initialize HTTP request", exception)
+            // A server honouring the Range probe answers 206 with a total in Content-Range.
+            // If it ignores Range and returns 200 we fall back to Content-Length; seeking then
+            // still works because reads are re-issued with explicit ranges each time.
+            val contentRange = response.header("Content-Range")
+            fileLength = contentRange?.substringAfterLast('/')?.toLongOrNull()
+                ?: response.header("Content-Length")?.toLongOrNull()
+                ?: 0L
+            if (fileLength <= 0L) {
+                throw IOException("Server did not report a content length; cannot dump over HTTP")
+            }
+            fileName = getFileNameFromHeaders(response.headers)
         }
     }
 
 
-    fun length(): Long {
+    override fun length(): Long {
         return fileLength
     }
 
-    fun position(): Long {
+    override fun position(): Long {
         return position
-    }
-
-    fun getFileName(): String {
-        return fileName
     }
 
     /**
@@ -88,7 +94,11 @@ object HttpUtil {
      * partition image can never be written from a short read. Honours both coroutine cancellation
      * and [cancel].
      */
-    suspend fun readFully(byteArray: ByteArray, onBytes: (Int) -> Unit = {}): Int =
+    override suspend fun readFully(buffer: ByteArray) {
+        readRange(buffer)
+    }
+
+    suspend fun readRange(byteArray: ByteArray, onBytes: (Int) -> Unit = {}): Int =
         withContext(Dispatchers.IO) {
             val buffer = ByteArray(64 * 1024)
             var totalBytesRead = 0
@@ -138,9 +148,9 @@ object HttpUtil {
     }
 
     /** Convenience wrapper kept for callers that do not need progress callbacks. */
-    suspend fun read(byteArray: ByteArray): Int = readFully(byteArray)
+    suspend fun read(byteArray: ByteArray): Int = readRange(byteArray)
 
-    fun seek(bytePosition: Long) {
+    override fun seek(bytePosition: Long) {
         if (bytePosition in 0 until fileLength) {
             position = bytePosition
         } else {
@@ -158,6 +168,6 @@ object HttpUtil {
                 }
             }
         }
-        return Paths.get(URI(url).path).fileName.toString()
+        return url.toHttpUrlOrNull()?.pathSegments?.lastOrNull().orEmpty().ifEmpty { "payload.bin" }
     }
 }

@@ -6,8 +6,10 @@ import com.rcmiku.payload.dumper.compose.model.ArchiveInfo
 import com.rcmiku.payload.dumper.compose.model.PartitionInfo
 import com.rcmiku.payload.dumper.compose.model.Payload
 import com.rcmiku.payload.dumper.compose.model.VerifyState
+import android.net.Uri
 import com.rcmiku.payload.dumper.compose.utils.DumpUtil
 import com.rcmiku.payload.dumper.compose.utils.HttpUtil
+import com.rcmiku.payload.dumper.compose.utils.InputSourceHolder
 import com.rcmiku.payload.dumper.compose.utils.PayloadUtil
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -81,6 +83,15 @@ class PayloadDumperViewModel : ViewModel() {
 
     private val dumpJobs = mutableMapOf<String, Job>()
 
+    /** Destination SAF folder for dumped images, shared across dumps in this session. */
+    private var outputTreeUri: Uri? = null
+
+    fun setOutputTreeUri(uri: Uri?) {
+        outputTreeUri = uri
+    }
+
+    fun outputTreeUri(): Uri? = outputTreeUri
+
     /**
      * Starts extraction of [partitionName]. Returns false if a dump for that partition is already
      * running (the caller can then offer to cancel it instead).
@@ -98,7 +109,8 @@ class PayloadDumperViewModel : ViewModel() {
                 DumpUtil().dump(
                     partitionName = partitionName,
                     payload = payload,
-                    isPath = payload.isPath,
+                    source = InputSourceHolder.require(),
+                    outputTreeUri = outputTreeUri,
                     onProgressUpdate = { produced ->
                         val total = _partitionInfoList.value
                             .firstOrNull { it.partitionName == partitionName }?.size ?: 0L

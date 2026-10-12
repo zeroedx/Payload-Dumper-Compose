@@ -48,12 +48,9 @@ import com.rcmiku.payload.dumper.compose.ui.component.InputDialog
 import com.rcmiku.payload.dumper.compose.ui.component.InputInfoCard
 import com.rcmiku.payload.dumper.compose.ui.component.PartitionDialog
 import com.rcmiku.payload.dumper.compose.ui.component.PartitionInfoItem
-import com.rcmiku.payload.dumper.compose.ui.component.RequestPermissionDialog
 import com.rcmiku.payload.dumper.compose.ui.component.RomInfoCard
 import com.rcmiku.payload.dumper.compose.utils.AppContextUtil
 import com.rcmiku.payload.dumper.compose.utils.MiscUtil.getItemShape
-import com.rcmiku.payload.dumper.compose.utils.MiscUtil.getRealPathFromUri
-import com.rcmiku.payload.dumper.compose.utils.MiscUtil.isManageExternalStoragePermissionGranted
 import com.rcmiku.payload.dumper.compose.utils.ParseUtil
 import com.rcmiku.payload.dumper.compose.utils.PreferencesUtil
 import com.rcmiku.payload.dumper.compose.viewModel.PayloadDumperViewModel
@@ -120,35 +117,41 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
     val showInputDialog = remember { mutableStateOf(false) }
     val showCustomUserAgentDialog = remember { mutableStateOf(false) }
     val showAboutDialog = remember { mutableStateOf(false) }
-    val showRequestPermissionDialog = remember { mutableStateOf(false) }
     var expanded by rememberSaveable { mutableStateOf(false) }
     val showTopPopup = rememberSaveable { mutableStateOf(false) }
     val isTopPopupExpanded = rememberSaveable { mutableStateOf(false) }
     val dropdownOptions = stringArrayResource(R.array.dropdownOptions)
     val searchValue = viewModel.search.collectAsState()
 
+    // Pick an OTA ZIP / payload.bin via SAF and remember the content Uri directly (no all-files
+    // access needed).
     val launcher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent(),
+        contract = ActivityResultContracts.OpenDocument(),
         onResult = { uri: Uri? ->
             uri?.let {
-                getRealPathFromUri(context = AppContextUtil.context, uri)?.let { path ->
-                    pathOrUrl.value = path
-                    PreferencesUtil().perfSet("pathOrUrl", path)
+                val flags = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                runCatching {
+                    AppContextUtil.context.contentResolver.takePersistableUriPermission(it, flags)
                 }
+                pathOrUrl.value = it.toString()
+                PreferencesUtil().perfSet("pathOrUrl", pathOrUrl.value)
             }
         }
     )
 
+    // Choose the destination folder for dumped images via SAF. Persist read/write access so it
+    // survives app restarts.
     val folderPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
         uri?.let {
-            getRealPathFromUri(context = AppContextUtil.context, uri)?.let { path ->
-                PreferencesUtil().perfSet(
-                    "customFolder",
-                    path
-                )
+            val flags = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            runCatching {
+                AppContextUtil.context.contentResolver.takePersistableUriPermission(it, flags)
             }
+            viewModel.setOutputTreeUri(it)
+            PreferencesUtil().perfSet("customFolder", it.toString())
         }
     }
 
@@ -184,13 +187,7 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                                             isTopPopupExpanded.value = false
                                             when (index) {
                                                 0 -> showCustomUserAgentDialog.value = true
-                                                1 -> {
-                                                    if (isManageExternalStoragePermissionGranted())
-                                                        folderPickerLauncher.launch(null)
-                                                    else
-                                                        showRequestPermissionDialog.value = true
-                                                }
-
+                                                1 -> folderPickerLauncher.launch(null)
                                                 2 -> showAboutDialog.value = true
                                             }
                                         },
@@ -307,10 +304,7 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                                 },
                                 title = stringResource(R.string.from_local),
                                 onClick = {
-                                    if (isManageExternalStoragePermissionGranted())
-                                        launcher.launch("application/zip")
-                                    else
-                                        showRequestPermissionDialog.value = true
+                                    launcher.launch(arrayOf("application/zip", "application/octet-stream"))
                                 }
                             )
                             SuperArrow(
@@ -346,9 +340,9 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                                 text = stringResource(R.string.parse),
                                 onClick = {
                                     coroutineScope.launch {
-                                        ParseUtil().parse(
+                                        ParseUtil.loadPayload(
                                             pathOrUrl = pathOrUrl.value,
-                                            onSuccess = { payloadTemp ->
+                                            onParsed = { payloadTemp ->
                                                 viewModel.initPayloadDumper(payload = payloadTemp)
                                                 focusManager.clearFocus()
                                                 keyboardController?.hide()
@@ -402,6 +396,5 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
     InputDialog(showInputDialog, pathOrUrl)
     CustomUserAgent(showCustomUserAgentDialog)
     AboutDialog(showAboutDialog)
-    RequestPermissionDialog(showRequestPermissionDialog)
     selectedPartitionInfo.value?.let { PartitionDialog(showDialog, it) }
 }

@@ -1,9 +1,9 @@
 package com.rcmiku.payload.dumper.compose.utils
 
+import android.net.Uri
 import android.widget.Toast
 import com.rcmiku.payload.dumper.compose.R
 import com.rcmiku.payload.dumper.compose.model.Payload
-import com.rcmiku.payload.dumper.compose.utils.AppContextUtil.context
 import com.rcmiku.payload.dumper.compose.utils.MiscUtil.isReadable
 import com.rcmiku.payload.dumper.compose.utils.MiscUtil.isValidUrl
 import kotlinx.coroutines.Dispatchers
@@ -11,65 +11,64 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.RandomAccessFile
 
-class ParseUtil {
-    lateinit var payload: Payload
+/**
+ * Builds a [SeekableInput] for [pathOrUrl] and parses the payload manifest.
+ *
+ * A plain filesystem path is opened as a seekable file; a `content://` URI is opened read-only
+ * through SAF; an `http(s)://` URL uses the shared [HttpUtil] Range reader.
+ */
+object ParseUtil {
 
-    suspend fun parse(pathOrUrl: String, onSuccess: (Payload) -> Unit) {
-        if (pathOrUrl.isNotBlank() && pathOrUrl.isValidUrl()) {
-            handleParsing(pathOrUrl, onSuccess) {
-                HttpUtil.init(pathOrUrl)
-                val payloadOffset = PayloadUtil.getPayloadOffset(pathOrUrl)
-                PayloadUtil.initPayload(HttpUtil.getFileName(), HttpUtil, payloadOffset)
+    suspend fun loadPayload(pathOrUrl: String, onParsed: suspend (Payload) -> Unit) {
+        withContext(Dispatchers.IO) {
+            val source: SeekableInput
+            val fileName: String
+            when {
+                pathOrUrl.isValidUrl() -> {
+                    HttpUtil.init(pathOrUrl)
+                    source = HttpUtil
+                    fileName = HttpUtil.name
+                }
+
+                pathOrUrl.startsWith("content://") -> {
+                    val uri = Uri.parse(pathOrUrl)
+                    val input = UriSeekableInput(AppContextUtil.context, uri)
+                    source = input
+                    fileName = SafUtil.queryDisplayName(AppContextUtil.context, uri)
+                        ?: "payload.bin"
+                }
+
+                pathOrUrl.isReadable() -> {
+                    // Read-only: we only ever read from the OTA package here.
+                    val file = File(pathOrUrl)
+                    source = FileSeekableInput(RandomAccessFile(file, "r"))
+                    fileName = file.name
+                }
+
+                else -> throw IllegalArgumentException("Unsupported path or URL: $pathOrUrl")
             }
-        } else if (pathOrUrl.isReadable()) {
-            handleParsing(pathOrUrl, onSuccess) {
-                val payloadOffset = PayloadUtil.getPayloadOffset(pathOrUrl)
-                // Read-only: parsing must never need a write handle on the user's OTA file.
-                val raf = withContext(Dispatchers.IO) { RandomAccessFile(pathOrUrl, "r") }
-                try {
-                    val payload = PayloadUtil.initPayload(File(pathOrUrl).name, raf, payloadOffset)
-                    RandomAccessFileUtil.init(raf)
-                    payload
-                } catch (t: Throwable) {
-                    // Parsing failed (e.g. delta payload rejected): do not leak the handle.
-                    runCatching { raf.close() }
-                    throw t
+
+            try {
+                val payloadOffset = PayloadUtil.getPayloadOffset(source)
+                val payload = PayloadUtil.initPayload(fileName, source, payloadOffset)
+                InputSourceHolder.set(source)
+                withContext(Dispatchers.Main) {
+                    onParsed(payload)
+                    toast(AppContextUtil.context, AppContextUtil.context.getString(R.string.parse_success_message))
+                }
+            } catch (t: Throwable) {
+                if (InputSourceHolder.current === source) InputSourceHolder.clear()
+                source.close()
+                val appContext = AppContextUtil.context
+                withContext(Dispatchers.Main) {
+                    toast(appContext, t.message ?: appContext.getString(R.string.url_error_message))
                 }
             }
-        } else {
-            showToast(R.string.url_error_message)
         }
     }
 
-    private suspend fun handleParsing(
-        pathOrUrl: String,
-        onSuccess: (Payload) -> Unit,
-        parseLogic: suspend () -> Payload
-    ) {
-        showToast(R.string.parse_message)
-
-        kotlin.runCatching {
-            parseLogic()
-        }.onSuccess { parsedPayload ->
-            onSuccess(parsedPayload)
-            savePreference(pathOrUrl)
-            showToast(R.string.parse_success_message)
-        }.onFailure { exception ->
-            showToast(exception.message ?: "Unknown error")
-        }
-    }
-
-    private fun showToast(messageResId: Int) {
-        Toast.makeText(context, context.getString(messageResId), Toast.LENGTH_SHORT).show()
-    }
-
-    private fun showToast(message: String) {
+    private fun toast(context: android.content.Context, message: String) {
         Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
-    }
-
-    private fun savePreference(pathOrUrl: String) {
-        val key = if (pathOrUrl.isValidUrl()) "pathOrUrl" else "url"
-        PreferencesUtil().perfSet(key, pathOrUrl)
     }
 
 }

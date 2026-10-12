@@ -26,10 +26,7 @@ import java.io.File
 import java.io.IOException
 import java.io.OutputStream
 import java.io.RandomAccessFile
-import java.nio.channels.Channels
 import java.nio.charset.StandardCharsets
-import java.nio.file.Files
-import java.nio.file.Paths
 
 object PayloadUtil {
 
@@ -39,112 +36,64 @@ object PayloadUtil {
     /** Max size of a raw REPLACE blob we are willing to buffer in memory. */
     private const val MAX_IN_MEMORY_OPERATION = 64L * 1024 * 1024
 
+    /** Sanity bound on the proto manifest size, to avoid allocating absurd buffers. */
+    private const val MAX_MANIFEST_SIZE = 256L * 1024 * 1024
+
     private val muteX by lazy {
         Mutex()
     }
 
-    private fun initPayloadLocal(
-        fileName: String,
-        raf: RandomAccessFile,
-        payloadOffset: Long
-    ): Payload {
-        raf.seek(payloadOffset)
-        val magicBytes = ByteArray(4)
-
-        raf.readFully(magicBytes)
-        if (String(magicBytes, StandardCharsets.UTF_8) != MAGIC_VALUE) {
-            throw RuntimeException("Invalid magic value")
-        }
-
-        val fileFormatVersion = raf.readLong()
-        if (fileFormatVersion != FORMAT_VERSION) {
-            throw RuntimeException("Unsupported file format version")
-        }
-
-        val manifestSize = raf.readLong()
-        val metadataSignatureSize = raf.readInt()
-
-        val manifest = ByteArray(manifestSize.toInt())
-        raf.readFully(manifest)
-
-        val metadataSignatureMessage = ByteArray(metadataSignatureSize)
-        raf.readFully(metadataSignatureMessage)
-
-        val deltaArchiveManifest = UpdateMetadata.DeltaArchiveManifest.parseFrom(manifest)
-        val dataOffset: Long = raf.channel.position()
-        val payloadHeader = PayloadHeader(fileFormatVersion, manifestSize, metadataSignatureSize)
-        return Payload(
-            fileName,
-            payloadHeader,
-            deltaArchiveManifest,
-            dataOffset,
-            deltaArchiveManifest.blockSize,
-            raf.length(),
-            true
-        )
-    }
-
-    private suspend fun initPayloadFromHttp(
-        fileName: String,
-        httpUtil: HttpUtil,
-        payloadOffset: Long
-    ): Payload {
-        httpUtil.seek(payloadOffset)
-        val magicBytes = ByteArray(4)
-        httpUtil.read(magicBytes)
-        if (String(magicBytes, StandardCharsets.UTF_8) != MAGIC_VALUE) {
-            throw IOException("Invalid magic value")
-        }
-
-        val fileFormatVersionBytes = ByteArray(8)
-        httpUtil.read(fileFormatVersionBytes)
-        val fileFormatVersion = fileFormatVersionBytes.toLong()
-        if (fileFormatVersion != FORMAT_VERSION) {
-            throw IOException("Unsupported file format version")
-        }
-
-        val manifestSizeBytes = ByteArray(8)
-        httpUtil.read(manifestSizeBytes)
-        val manifestSize = manifestSizeBytes.toLong()
-
-        val metadataSignatureSizeBytes = ByteArray(4)
-        httpUtil.read(metadataSignatureSizeBytes)
-        val metadataSignatureSize = metadataSignatureSizeBytes.toInt()
-
-        val manifest = ByteArray(manifestSize.toInt())
-        httpUtil.read(manifest)
-        val metadataSignatureMessage = ByteArray(metadataSignatureSize)
-        httpUtil.read(metadataSignatureMessage)
-        val deltaArchiveManifest = UpdateMetadata.DeltaArchiveManifest.parseFrom(manifest)
-        val dataOffset: Long = httpUtil.position()
-        val payloadHeader = PayloadHeader(fileFormatVersion, manifestSize, metadataSignatureSize)
-        return Payload(
-            fileName,
-            payloadHeader,
-            deltaArchiveManifest,
-            dataOffset,
-            deltaArchiveManifest.blockSize,
-            httpUtil.length(),
-            false
-        )
-    }
-
-    suspend fun initPayload(fileName: String, input: Any, payloadOffset: Long): Payload {
+    /**
+     * Parses the CrAU header and proto manifest from [source] at [payloadOffset]. Works for any
+     * [SeekableInput] (file, SAF URI or HTTP), which keeps the parsing logic in one place.
+     */
+    suspend fun initPayload(fileName: String, source: SeekableInput, payloadOffset: Long): Payload {
         if (payloadOffset == -1L) {
             throw IOException("Invalid payload offset value")
         }
 
-        val payload = when (input) {
-            is RandomAccessFile -> {
-                initPayloadLocal(fileName, input, payloadOffset)
-            }
-
-            is HttpUtil -> {
-                initPayloadFromHttp(fileName, input, payloadOffset)
-            }
-
-            else -> throw IllegalArgumentException("Unsupported input type: ${input.javaClass.name}.")
+        source.seek(payloadOffset)
+        val magicBytes = ByteArray(4)
+        source.readFully(magicBytes)
+        if (String(magicBytes, StandardCharsets.UTF_8) != MAGIC_VALUE) {
+            throw IOException("Invalid payload magic value (not a CrAU payload)")
         }
+
+        val fileFormatVersionBytes = ByteArray(8)
+        source.readFully(fileFormatVersionBytes)
+        val fileFormatVersion = fileFormatVersionBytes.toLong()
+        if (fileFormatVersion != FORMAT_VERSION) {
+            throw IOException("Unsupported payload file format version $fileFormatVersion")
+        }
+
+        val manifestSizeBytes = ByteArray(8)
+        source.readFully(manifestSizeBytes)
+        val manifestSize = manifestSizeBytes.toLong()
+        if (manifestSize <= 0 || manifestSize > MAX_MANIFEST_SIZE) {
+            throw IOException("Unreasonable manifest size: $manifestSize")
+        }
+
+        val metadataSignatureSizeBytes = ByteArray(4)
+        source.readFully(metadataSignatureSizeBytes)
+        val metadataSignatureSize = metadataSignatureSizeBytes.toInt()
+
+        val manifest = ByteArray(manifestSize.toInt())
+        source.readFully(manifest)
+        val metadataSignatureMessage = ByteArray(metadataSignatureSize)
+        source.readFully(metadataSignatureMessage)
+
+        val deltaArchiveManifest = UpdateMetadata.DeltaArchiveManifest.parseFrom(manifest)
+        val dataOffset: Long = source.position()
+        val payloadHeader = PayloadHeader(fileFormatVersion, manifestSize, metadataSignatureSize)
+        val payload = Payload(
+            fileName,
+            payloadHeader,
+            deltaArchiveManifest,
+            dataOffset,
+            deltaArchiveManifest.blockSize,
+            source.length(),
+            source.isLocal
+        )
 
         // Reject incremental (delta) payloads up front, before anything is extracted.
         // Extracting one would silently produce a partial image; this app only supports full OTA.
@@ -212,35 +161,37 @@ object PayloadUtil {
         }
     }
 
-    private suspend fun extractFromLocal(
+    private suspend fun extractOperation(
         op: UpdateMetadata.InstallOperation,
         partOutput: RandomAccessFile,
-        raf: RandomAccessFile,
+        source: SeekableInput,
         blockSize: Int,
         offset: Long,
     ) {
         muteX.withLock {
             if (op.dstExtentsList.isEmpty()) return@withLock
-            raf.seek(offset + op.dataOffset)
+            source.seek(offset + op.dataOffset)
             partOutput.seek(op.firstDstOffset(blockSize))
 
-            val otaInputStream = Channels.newInputStream(raf.channel)
-
             when (op.type) {
-                UpdateMetadata.InstallOperation.Type.REPLACE_XZ -> {
-                    val xz = XZCompressorInputStream(otaInputStream)
-                    xz.use { writeDecompressed(partOutput, it, op, blockSize) }
-                }
-
+                UpdateMetadata.InstallOperation.Type.REPLACE_XZ,
                 UpdateMetadata.InstallOperation.Type.REPLACE_BZ -> {
-                    val bz = BZip2CompressorInputStream(BufferedInputStream(otaInputStream))
-                    bz.use { writeDecompressed(partOutput, it, op, blockSize) }
+                    val data = readBlob(op, source)
+                    // BZip2 needs a mark/reset-capable stream; BufferedInputStream provides it.
+                    val raw = if (op.type == UpdateMetadata.InstallOperation.Type.REPLACE_BZ) {
+                        BufferedInputStream(data.toBufferedInputStream())
+                    } else {
+                        data.toBufferedInputStream()
+                    }
+                    val decompressed = when (op.type) {
+                        UpdateMetadata.InstallOperation.Type.REPLACE_XZ -> XZCompressorInputStream(raw)
+                        else -> BZip2CompressorInputStream(raw)
+                    }
+                    decompressed.use { writeDecompressed(partOutput, it, op, blockSize) }
                 }
 
                 UpdateMetadata.InstallOperation.Type.REPLACE -> {
-                    ensureSmallEnoughToBuffer(op.dataLength)
-                    val data = ByteArray(op.dataLength.toInt())
-                    raf.readFully(data)
+                    val data = readBlob(op, source)
                     partOutput.write(data)
                 }
 
@@ -256,47 +207,15 @@ object PayloadUtil {
         }
     }
 
-    private suspend fun extractFromHttp(
+    /** Reads the compressed blob for [op] from [source], enforcing the in-memory size limit. */
+    private suspend fun readBlob(
         op: UpdateMetadata.InstallOperation,
-        partOutput: RandomAccessFile,
-        httpUtil: HttpUtil,
-        blockSize: Int,
-        offset: Long,
-    ) {
-        muteX.withLock {
-            if (op.dstExtentsList.isEmpty()) return@withLock
-            httpUtil.seek(offset + op.dataOffset)
-            partOutput.seek(op.firstDstOffset(blockSize))
-
-            when (op.type) {
-                UpdateMetadata.InstallOperation.Type.REPLACE_XZ -> {
-                    val data = ByteArray(op.dataLength.toInt()); httpUtil.read(data)
-                    val xz = XZCompressorInputStream(data.toBufferedInputStream())
-                    xz.use { writeDecompressed(partOutput, it, op, blockSize) }
-                }
-
-                UpdateMetadata.InstallOperation.Type.REPLACE_BZ -> {
-                    val data = ByteArray(op.dataLength.toInt()); httpUtil.read(data)
-                    val bz = BZip2CompressorInputStream(BufferedInputStream(data.toBufferedInputStream()))
-                    bz.use { writeDecompressed(partOutput, it, op, blockSize) }
-                }
-
-                UpdateMetadata.InstallOperation.Type.REPLACE -> {
-                    ensureSmallEnoughToBuffer(op.dataLength)
-                    val data = ByteArray(op.dataLength.toInt()); httpUtil.read(data)
-                    partOutput.write(data)
-                }
-
-                UpdateMetadata.InstallOperation.Type.ZERO -> {
-                    val targetSize = op.dstBlockCount() * blockSize
-                    writeZeros(partOutput, targetSize)
-                }
-
-                else -> {
-                    throw RuntimeException("Unsupported operation type ${op.type}")
-                }
-            }
-        }
+        source: SeekableInput,
+    ): ByteArray {
+        ensureSmallEnoughToBuffer(op.dataLength)
+        val data = ByteArray(op.dataLength.toInt())
+        source.readFully(data)
+        return data
     }
 
     private fun writeZeros(partOutput: RandomAccessFile, size: Long) {
@@ -311,7 +230,7 @@ object PayloadUtil {
 
     /** Guards against allocating huge in-memory buffers for raw REPLACE operations. */
     private fun ensureSmallEnoughToBuffer(dataLength: Long) {
-        if (dataLength > MAX_IN_MEMORY_OPERATION) {
+        if (dataLength < 0 || dataLength > MAX_IN_MEMORY_OPERATION) {
             throw IOException(
                 "REPLACE operation of $dataLength bytes exceeds the in-memory limit " +
                     "($MAX_IN_MEMORY_OPERATION bytes)"
@@ -321,50 +240,30 @@ object PayloadUtil {
 
     suspend fun extractPartition(
         metadataPartition: UpdateMetadata.PartitionUpdate,
-        input: Any,
-        outputDir: String,
+        source: SeekableInput,
+        output: PartitionOutput,
         payload: Payload,
         onProgressUpdate: (Long) -> Unit
     ) {
         withContext(Dispatchers.IO) {
-            val downloadDir = Paths.get(outputDir)
-            if (!Files.exists(downloadDir)) {
-                Files.createDirectories(downloadDir)
-            }
-
-            val outputFile = File(downloadDir.toFile(), "${metadataPartition.partitionName}.img")
             // Approximate expected output size, used to make the progress bar monotonic.
             val totalBytes = metadataPartition.operationsList
                 .sumOf { it.dstExtentsList.sumOf { e -> e.numBlocks } } * payload.blockSize
             var produced = 0L
 
             try {
-                RandomAccessFile(outputFile, "rw").use { partOutput ->
+                RandomAccessFile(output.file, "rw").use { partOutput ->
                     metadataPartition.operationsList.forEach { operation ->
                         // Cooperative cancellation: the loop body does blocking file/network IO,
                         // so nothing else would interrupt it promptly.
                         currentCoroutineContext().ensureActive()
-                        when (input) {
-                            is RandomAccessFile -> {
-                                extractFromLocal(
-                                    operation,
-                                    partOutput,
-                                    input,
-                                    payload.blockSize,
-                                    payload.dataOffset,
-                                )
-                            }
-
-                            is HttpUtil -> {
-                                extractFromHttp(
-                                    operation,
-                                    partOutput,
-                                    input,
-                                    payload.blockSize,
-                                    payload.dataOffset
-                                )
-                            }
-                        }
+                        extractOperation(
+                            operation,
+                            partOutput,
+                            source,
+                            payload.blockSize,
+                            payload.dataOffset,
+                        )
                         produced += operation.dstExtentsList.sumOf { e -> e.numBlocks } *
                             payload.blockSize
                         onProgressUpdate(produced)
@@ -372,67 +271,99 @@ object PayloadUtil {
                 }
             } catch (t: Throwable) {
                 // Never leave a half-written image behind: it would look like a real dump.
-                outputFile.delete()
+                output.cleanup()
                 throw t
             }
 
             // If we know the expected size and the output is short, treat it as a failure.
-            if (totalBytes > 0 && outputFile.length() < totalBytes) {
-                outputFile.delete()
+            if (totalBytes > 0 && output.file.length() < totalBytes) {
+                val actual = output.file.length()
+                output.cleanup()
                 throw IOException(
-                    "Incomplete extraction: ${outputFile.name} is ${outputFile.length()} bytes, " +
-                        "expected $totalBytes"
+                    "Incomplete extraction: ${metadataPartition.partitionName}.img is $actual " +
+                        "bytes, expected $totalBytes"
                 )
             }
+
+            // The manifest declares the final image size; an op writing past its dst extent would
+            // silently inflate the file. Reject any such mismatch.
+            if (metadataPartition.hasNewPartitionInfo()) {
+                val declared = metadataPartition.newPartitionInfo.size
+                val actual = output.file.length()
+                if (declared > 0 && actual != declared) {
+                    output.cleanup()
+                    throw IOException(
+                        "Image length ($actual) does not match the manifest ($declared)"
+                    )
+                }
+            }
+            // The image is complete; publication/verification is the caller's responsibility.
         }
     }
 
-    suspend fun getPayloadOffset(pathOrUrl: String): Long {
-        var payloadOffset = -1L
-        val endBytes = ByteArray(4096)
-        val fileName = "payload.bin"
-        if (pathOrUrl.endsWith(".bin")) {
-            payloadOffset = 0
-        } else if (!pathOrUrl.startsWith("http://") && !pathOrUrl.startsWith("https://")) {
-            val zipFile = File(pathOrUrl)
-            withContext(Dispatchers.IO) {
-                RandomAccessFile(zipFile, "r").use {
-                    it.seek(it.length() - 4096)
-                    it.readFully(endBytes)
-                    val centralDirectoryInfo = locateCentralDirectory(endBytes, it.length())
-                    it.seek(centralDirectoryInfo.offset)
-                    val centralDirectory = ByteArray(centralDirectoryInfo.size.toInt())
-                    it.readFully(centralDirectory)
-                    val localHeaderOffset = locateLocalFileHeader(centralDirectory, fileName)
-                    if (localHeaderOffset < 0) {
-                        throw IOException("payload.bin not found inside the OTA package")
-                    }
-                    val localHeaderBytes = ByteArray(256)
-                    it.seek(localHeaderOffset)
-                    it.readFully(localHeaderBytes)
-                    payloadOffset = locateLocalFileOffset(localHeaderBytes) + localHeaderOffset
-                }
-            }
-        } else if (pathOrUrl.startsWith("http://") || pathOrUrl.startsWith("https://")) {
-            HttpUtil.seek(HttpUtil.length() - 4096)
-            HttpUtil.read(endBytes)
-            val centralDirectoryInfo = locateCentralDirectory(endBytes, HttpUtil.length())
-            HttpUtil.seek(centralDirectoryInfo.offset)
-            val centralDirectory = ByteArray(centralDirectoryInfo.size.toInt())
-            HttpUtil.read(centralDirectory)
-            val localHeaderOffset = locateLocalFileHeader(centralDirectory, fileName)
-            val localHeaderBytes = ByteArray(256)
-            HttpUtil.seek(localHeaderOffset)
-            HttpUtil.read(localHeaderBytes)
-            payloadOffset = locateLocalFileOffset(localHeaderBytes) + localHeaderOffset
+    /**
+     * Locates the absolute byte offset of `payload.bin` inside an OTA ZIP, or 0 for a bare
+     * `payload.bin`. Works from any [SeekableInput].
+     */
+    suspend fun getPayloadOffset(input: SeekableInput, fileName: String = "payload.bin"): Long {
+        // A bare payload.bin (file or URL) starts at offset 0.
+        if (fileName == "payload.bin" && input.length() >= 4) {
+            val magic = ByteArray(4)
+            input.seek(0)
+            input.readFully(magic)
+            if (String(magic, StandardCharsets.UTF_8) == MAGIC_VALUE) return 0L
         }
-        return payloadOffset
+
+        val fileLength = input.length()
+        if (fileLength < 4096) throw IOException("File too small to be an OTA package")
+
+        val endBytes = ByteArray(4096)
+        input.seek(fileLength - 4096)
+        input.readFully(endBytes)
+
+        val centralDirectoryInfo = locateCentralDirectory(endBytes, fileLength)
+        if (centralDirectoryInfo.offset < 0 || centralDirectoryInfo.size <= 0) {
+            throw IOException("Could not locate ZIP central directory")
+        }
+
+        input.seek(centralDirectoryInfo.offset)
+        val centralDirectory = ByteArray(centralDirectoryInfo.size.toInt())
+        input.readFully(centralDirectory)
+
+        val localHeaderOffset = locateLocalFileHeader(centralDirectory, fileName)
+        if (localHeaderOffset < 0) {
+            throw IOException("$fileName not found inside the OTA package")
+        }
+
+        val localHeaderBytes = ByteArray(256)
+        input.seek(localHeaderOffset)
+        input.readFully(localHeaderBytes)
+        return locateLocalFileOffset(localHeaderBytes) + localHeaderOffset
     }
 }
 
 /** Thrown when a delta/incremental payload (minor_version != 0) is parsed. */
 class UnsupportedDeltaPayloadException(val minorVersion: Int) :
     IOException("Incremental (delta) payload not supported (minor_version=$minorVersion)")
+
+/**
+ * Destination of a single partition image. Extraction always writes to [file] with random
+ * access; [onCommit] optionally publishes that file elsewhere (e.g. a SAF document) and the
+ * working file is then removed.
+ */
+class PartitionOutput(
+    val file: File,
+    private val onCommit: (suspend (File) -> Unit)? = null,
+) {
+    fun cleanup() {
+        runCatching { if (file.exists()) file.delete() }
+    }
+
+    suspend fun commit() {
+        onCommit?.invoke(file)
+        runCatching { if (file.exists()) file.delete() }
+    }
+}
 
 /**
  * An [OutputStream] that forwards writes to a shared [RandomAccessFile] but ignores [close].

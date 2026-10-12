@@ -14,6 +14,22 @@ object SafUtil {
 
     private const val MIME_OCTET = "application/octet-stream"
 
+    /**
+     * Tree URI of the public Download directory (`/storage/emulated/0/Download`), used as the
+     * picker's initial location so first use is guided to authorise the default output folder.
+     */
+    fun downloadsTreeUri(): Uri =
+        DocumentsContract.buildTreeDocumentUri(
+            "com.android.externalstorage.documents",
+            "primary:Download"
+        )
+
+    /** Whether [uri] still holds a persisted write grant for this app. */
+    fun hasWritePermission(context: Context, uri: Uri): Boolean =
+        context.contentResolver.persistedUriPermissions.any {
+            it.uri == uri && it.isWritePermission
+        }
+
     /** Best-effort display name for a document [uri]. */
     fun queryDisplayName(context: Context, uri: Uri): String? {
         runCatching {

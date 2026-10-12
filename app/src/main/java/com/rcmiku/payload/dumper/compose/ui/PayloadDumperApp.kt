@@ -1,6 +1,7 @@
 package com.rcmiku.payload.dumper.compose.ui
 
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -23,6 +24,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.CardDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -51,8 +53,10 @@ import com.rcmiku.payload.dumper.compose.ui.component.PartitionInfoItem
 import com.rcmiku.payload.dumper.compose.ui.component.RomInfoCard
 import com.rcmiku.payload.dumper.compose.utils.AppContextUtil
 import com.rcmiku.payload.dumper.compose.utils.MiscUtil.getItemShape
+import com.rcmiku.payload.dumper.compose.utils.OutputTreeHolder
 import com.rcmiku.payload.dumper.compose.utils.ParseUtil
 import com.rcmiku.payload.dumper.compose.utils.PreferencesUtil
+import com.rcmiku.payload.dumper.compose.utils.SafUtil
 import com.rcmiku.payload.dumper.compose.viewModel.PayloadDumperViewModel
 import dev.chrisbanes.haze.ExperimentalHazeApi
 import dev.chrisbanes.haze.HazeEffectScope
@@ -140,7 +144,8 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
     )
 
     // Choose the destination folder for dumped images via SAF. Persist read/write access so it
-    // survives app restarts.
+    // survives app restarts. The picker opens at the current folder, or the public Download root
+    // by default.
     val folderPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
@@ -151,7 +156,19 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                 AppContextUtil.context.contentResolver.takePersistableUriPermission(it, flags)
             }
             viewModel.setOutputTreeUri(it)
-            PreferencesUtil().perfSet("customFolder", it.toString())
+            OutputTreeHolder.save(it)
+        }
+    }
+
+    // First use (or a revoked/lost grant): guide the user to authorise the default Download folder.
+    LaunchedEffect(Unit) {
+        if (viewModel.outputTreeUri() == null) {
+            Toast.makeText(
+                AppContextUtil.context,
+                AppContextUtil.context.getString(R.string.select_output_folder),
+                Toast.LENGTH_LONG
+            ).show()
+            folderPickerLauncher.launch(SafUtil.downloadsTreeUri())
         }
     }
 
@@ -187,7 +204,9 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                                             isTopPopupExpanded.value = false
                                             when (index) {
                                                 0 -> showCustomUserAgentDialog.value = true
-                                                1 -> folderPickerLauncher.launch(null)
+                                                1 -> folderPickerLauncher.launch(
+                                                    viewModel.outputTreeUri() ?: SafUtil.downloadsTreeUri()
+                                                )
                                                 2 -> showAboutDialog.value = true
                                             }
                                         },

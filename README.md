@@ -1,7 +1,6 @@
 ## Payload Dumper Compose
 
-A simple tool to dump Android payload.bin from full OTA URL, built with
-[Jetpack Compose](https://developer.android.com/jetpack/compose).
+在手机上直接解析和提取 OTA 包分区镜像的简单工具，
 
 ## Screenshot:
 

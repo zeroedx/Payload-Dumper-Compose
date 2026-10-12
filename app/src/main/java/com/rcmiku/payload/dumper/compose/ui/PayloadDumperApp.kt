@@ -114,6 +114,7 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
     val pathOrUrl =
         rememberSaveable { mutableStateOf(PreferencesUtil().perfGet("pathOrUrl") ?: "") }
     val partitionInfoList by viewModel.cachePartitionInfoList.collectAsState()
+    val allPartitionInfoList by viewModel.allPartitionInfoList.collectAsState()
     val archiveInfo = viewModel.archiveInfo.collectAsState()
     val payload = viewModel.payload.collectAsState()
     val selectedPartitionInfo = remember { mutableStateOf<PartitionInfo?>(null) }
@@ -408,6 +409,26 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                         onCancel = {
                             viewModel.cancelDump(partitionInfo.partitionName)
                         })
+                }
+            }
+
+            // Empty state: results exist but the active search keyword matches none of them.
+            if (searchValue.value.isNotBlank() &&
+                allPartitionInfoList.isNotEmpty() &&
+                partitionInfoList.isEmpty()
+            ) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = stringResource(R.string.search_no_results),
+                            color = MiuixTheme.colorScheme.onSecondaryVariant
+                        )
+                    }
                 }
             }
         }

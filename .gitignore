@@ -2,6 +2,9 @@
 *.apk
 *.ap_
 
+# OpenHands agent memory/scratch
+.openhands/
+
 # Mac files
 .DS_Store
 

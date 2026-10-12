@@ -101,6 +101,10 @@ object PayloadUtil {
             throw UnsupportedDeltaPayloadException(payload.minorVersion)
         }
 
+        if (payload.blockSize <= 0) {
+            throw IOException("Invalid block size in manifest: ${payload.blockSize}")
+        }
+
         return payload
     }
 
@@ -127,38 +131,23 @@ object PayloadUtil {
         }
     }
 
-    /** Number of blocks this operation produces (total across all destination extents). */
-    private fun UpdateMetadata.InstallOperation.dstBlockCount(): Long =
-        dstExtentsList.sumOf { it.numBlocks }
-
-    /** Byte offset of the first destination extent. */
-    private fun UpdateMetadata.InstallOperation.firstDstOffset(blockSize: Int): Long =
-        if (dstExtentsList.isEmpty()) 0L else dstExtentsList[0].startBlock * blockSize
-
     /**
-     * Writes decompressed [input] into the destination extents, padding the final block with
-     * zeros. Uses a non-closing output stream wrapper so the shared [RandomAccessFile] (and its
-     * file descriptor) survives across the operations of the same partition.
+     * Writes the operation payload across all of its destination extents. A single op may target
+     * several non-contiguous extents (a gap in the image), so the data must be split per extent
+     * rather than streamed from the first extent onward. [input] is copied with each extent filled
+     * to its full `numBlocks * blockSize`; a short payload is zero-padded and an over-long one is
+     * rejected so a malformed op can never spill into the next extent.
      */
-    private fun writeDecompressed(
+    private fun writeAcrossExtents(
         partOutput: RandomAccessFile,
-        input: CompressorInputStream,
         op: UpdateMetadata.InstallOperation,
         blockSize: Int,
+        writeBody: (OutputStream) -> Unit,
     ) {
-        val targetSize = op.dstBlockCount() * blockSize
-        val nonClosing = NonClosingOutputStream(partOutput)
-        IOUtils.copy(input, nonClosing)
-        val written = nonClosing.bytesWritten
-        if (written < targetSize) {
-            val pad = ByteArray(blockSize)
-            var remaining = targetSize - written
-            while (remaining > 0) {
-                val chunk = minOf(remaining, blockSize.toLong()).toInt()
-                partOutput.write(pad, 0, chunk)
-                remaining -= chunk
-            }
-        }
+        val extents = op.dstExtentsList
+        val writer = ExtentOutputStream(partOutput, extents, blockSize)
+        writeBody(writer)
+        writer.padRemainingWithZeros()
     }
 
     private suspend fun extractOperation(
@@ -171,7 +160,6 @@ object PayloadUtil {
         muteX.withLock {
             if (op.dstExtentsList.isEmpty()) return@withLock
             source.seek(offset + op.dataOffset)
-            partOutput.seek(op.firstDstOffset(blockSize))
 
             when (op.type) {
                 UpdateMetadata.InstallOperation.Type.REPLACE_XZ,
@@ -187,17 +175,16 @@ object PayloadUtil {
                         UpdateMetadata.InstallOperation.Type.REPLACE_XZ -> XZCompressorInputStream(raw)
                         else -> BZip2CompressorInputStream(raw)
                     }
-                    decompressed.use { writeDecompressed(partOutput, it, op, blockSize) }
+                    decompressed.use { writeAcrossExtents(partOutput, op, blockSize) { out -> IOUtils.copy(it, out) } }
                 }
 
                 UpdateMetadata.InstallOperation.Type.REPLACE -> {
                     val data = readBlob(op, source)
-                    partOutput.write(data)
+                    writeAcrossExtents(partOutput, op, blockSize) { out -> out.write(data) }
                 }
 
                 UpdateMetadata.InstallOperation.Type.ZERO -> {
-                    val targetSize = op.dstBlockCount() * blockSize
-                    writeZeros(partOutput, targetSize)
+                    writeAcrossExtents(partOutput, op, blockSize) { /* nothing to write; pads zeros */ }
                 }
 
                 else -> {
@@ -216,16 +203,6 @@ object PayloadUtil {
         val data = ByteArray(op.dataLength.toInt())
         source.readFully(data)
         return data
-    }
-
-    private fun writeZeros(partOutput: RandomAccessFile, size: Long) {
-        val pad = ByteArray(1024 * 1024)
-        var remaining = size
-        while (remaining > 0) {
-            val chunk = minOf(remaining, pad.size.toLong()).toInt()
-            partOutput.write(pad, 0, chunk)
-            remaining -= chunk
-        }
     }
 
     /** Guards against allocating huge in-memory buffers for raw REPLACE operations. */
@@ -251,6 +228,12 @@ object PayloadUtil {
                 .sumOf { it.dstExtentsList.sumOf { e -> e.numBlocks } } * payload.blockSize
             var produced = 0L
 
+            val declaredSize = if (metadataPartition.hasNewPartitionInfo()) {
+                metadataPartition.newPartitionInfo.size
+            } else {
+                0L
+            }
+
             try {
                 RandomAccessFile(output.file, "rw").use { partOutput ->
                     metadataPartition.operationsList.forEach { operation ->
@@ -268,6 +251,13 @@ object PayloadUtil {
                             payload.blockSize
                         onProgressUpdate(produced)
                     }
+
+                    // Extents are block-aligned, so the last block usually overflows the declared
+                    // image size. Trim to the manifest size: the SHA-256 covers exactly those
+                    // bytes, and a short write is caught below.
+                    if (declaredSize in 1..partOutput.length()) {
+                        partOutput.setLength(declaredSize)
+                    }
                 }
             } catch (t: Throwable) {
                 // Never leave a half-written image behind: it would look like a real dump.
@@ -276,7 +266,7 @@ object PayloadUtil {
             }
 
             // If we know the expected size and the output is short, treat it as a failure.
-            if (totalBytes > 0 && output.file.length() < totalBytes) {
+            if (totalBytes > 0 && output.file.length() < totalBytes && declaredSize == 0L) {
                 val actual = output.file.length()
                 output.cleanup()
                 throw IOException(
@@ -285,15 +275,14 @@ object PayloadUtil {
                 )
             }
 
-            // The manifest declares the final image size; an op writing past its dst extent would
-            // silently inflate the file. Reject any such mismatch.
-            if (metadataPartition.hasNewPartitionInfo()) {
-                val declared = metadataPartition.newPartitionInfo.size
+            // The manifest declares the final image size; a mismatch means a truncated or
+            // mis-sized image that must never be published.
+            if (declaredSize > 0L) {
                 val actual = output.file.length()
-                if (declared > 0 && actual != declared) {
+                if (actual != declaredSize) {
                     output.cleanup()
                     throw IOException(
-                        "Image length ($actual) does not match the manifest ($declared)"
+                        "Image length ($actual) does not match the manifest ($declaredSize)"
                     )
                 }
             }
@@ -366,25 +355,93 @@ class PartitionOutput(
 }
 
 /**
- * An [OutputStream] that forwards writes to a shared [RandomAccessFile] but ignores [close].
- * The original code wrapped `partOutput.fd` in a `FileOutputStream`, and `IOUtils.copy` closed
- * that stream, which also closed the shared file descriptor and corrupted every later operation.
+ * An [OutputStream] that splits the operation payload across the destination extents of a single
+ * install operation, writing into the shared [RandomAccessFile] with random access.
+ *
+ * Multiple extents are not contiguous: when the current extent is full the stream seeks to the
+ * start of the next extent, leaving any gap in the image untouched. Writing past the last extent
+ * (a payload larger than the extents can hold) is rejected instead of silently corrupting the
+ * following region. [close] is intentionally a no-op so `IOUtils.copy` cannot close the shared
+ * file descriptor (a bug in the original code that corrupted every later operation).
  */
-private class NonClosingOutputStream(
+private class ExtentOutputStream(
     private val raf: RandomAccessFile,
+    extents: List<UpdateMetadata.Extent>,
+    private val blockSize: Int,
 ) : OutputStream() {
 
-    var bytesWritten: Long = 0
-        private set
+    private val extents = extents
+    private var extentIndex = 0
+    private var blockInExtent = 0
+    private var totalWritten = 0L
+    private val capacity = extents.sumOf { it.numBlocks } * blockSize
+
+    init {
+        require(extents.isNotEmpty()) { "operation has no destination extent" }
+        raf.seek(extents[0].startBlock * blockSize)
+    }
 
     override fun write(b: Int) {
-        raf.write(b)
-        bytesWritten += 1
+        val one = byteArrayOf(b.toByte())
+        write(one, 0, 1)
     }
 
     override fun write(b: ByteArray, off: Int, len: Int) {
-        raf.write(b, off, len)
-        bytesWritten += len.toLong()
+        var o = off
+        var n = len
+        while (n > 0) {
+            if (extentIndex >= extents.size) {
+                throw IOException(
+                    "Operation writes past its destination extents ($totalWritten + $n > $capacity bytes)"
+                )
+            }
+            val extent = extents[extentIndex]
+            val remainingBlocks = extent.numBlocks - blockInExtent
+            val remainingBytes = remainingBlocks * blockSize
+            val chunk = minOf(n.toLong(), remainingBytes.toLong()).toInt()
+
+            raf.write(b, o, chunk)
+            o += chunk
+            n -= chunk
+            totalWritten += chunk
+            blockInExtent += chunk / blockSize
+            val leftover = chunk % blockSize
+            if (leftover != 0) {
+                // A partial block: only the final extent of a payload may end mid-block, and the
+                // pad pass fills the rest with zeros (no seek, so the write position stays put).
+                blockInExtent += 1
+            }
+            if (blockInExtent >= extent.numBlocks) {
+                extentIndex += 1
+                blockInExtent = 0
+                if (extentIndex < extents.size) {
+                    raf.seek(extents[extentIndex].startBlock * blockSize)
+                }
+            }
+        }
+    }
+
+    /**
+     * Fills the remainder of the current extent, then every later extent, with zeros so all
+     * destination extents are fully materialised. Later extents are sought individually, so a gap
+     * between extents is never written.
+     */
+    fun padRemainingWithZeros() {
+        val pad = ByteArray(1 shl 16)
+        while (extentIndex < extents.size) {
+            val extent = extents[extentIndex]
+            var remaining = (extent.numBlocks - blockInExtent).toLong() * blockSize
+            while (remaining > 0) {
+                val chunk = minOf(remaining, pad.size.toLong()).toInt()
+                raf.write(pad, 0, chunk)
+                remaining -= chunk
+            }
+            extentIndex += 1
+            blockInExtent = 0
+            if (extentIndex < extents.size) {
+                raf.seek(extents[extentIndex].startBlock * blockSize)
+            }
+        }
     }
 
     override fun close() {

@@ -2,6 +2,7 @@ package com.rcmiku.payload.dumper.compose
 
 import chromeos_update_engine.UpdateMetadata
 import com.rcmiku.payload.dumper.compose.utils.FileSeekableInput
+import com.rcmiku.payload.dumper.compose.utils.HashUtil
 import com.rcmiku.payload.dumper.compose.utils.PartitionOutput
 import com.rcmiku.payload.dumper.compose.utils.PayloadUtil
 import kotlinx.coroutines.runBlocking
@@ -76,6 +77,18 @@ class PayloadExtractionTest {
             .addAllOperations(ops)
             .build()
 
+    private fun partition(
+        name: String,
+        ops: List<UpdateMetadata.InstallOperation>,
+        declaredSize: Long,
+    ) = UpdateMetadata.PartitionUpdate.newBuilder()
+        .setPartitionName(name)
+        .addAllOperations(ops)
+        .setNewPartitionInfo(
+            UpdateMetadata.PartitionInfo.newBuilder().setSize(declaredSize)
+        )
+        .build()
+
     @Test
     fun extractReplace_writesExactlyTheDataAndPadsToBlockBoundary() = runBlocking {
         val blockSize = 4096
@@ -126,6 +139,131 @@ class PayloadExtractionTest {
             assertArrayEquals(ByteArray(blockSize), bytes.copyOfRange(0, blockSize)) // zeros
             assertArrayEquals(lowC, bytes.copyOfRange(blockSize, 2 * blockSize))
             assertArrayEquals(lowA, bytes.copyOfRange(2 * blockSize, 3 * blockSize))
+        }
+    }
+
+    @Test
+    fun extractPartition_trimsBlockPaddingToDeclaredImageSize() = runBlocking {
+        val blockSize = 4096
+        val realSize = 1500L
+        val data = ByteArray(blockSize) { 0x5A }
+        val op = replaceOp(0, blockSize.toLong(), 0, 1)
+        // Manifest says the real partition is 1500 bytes though the extent covers a full block.
+        val payload = buildPayload(
+            blockSize,
+            listOf(partition("boot", listOf(op), declaredSize = realSize)),
+            data,
+        )
+
+        RandomAccessFile(payload, "r").use { raf ->
+            val source = FileSeekableInput(raf)
+            val parsed = PayloadUtil.initPayload("payload.bin", source, 0L)
+            val out = File(tmp.root, "boot.img")
+            PayloadUtil.extractPartition(
+                parsed.deltaArchiveManifest.partitionsList[0], source, PartitionOutput(out), parsed
+            ) {}
+
+            assertEquals(realSize, out.length())
+            // The retained bytes are a prefix of the block that was written.
+            assertArrayEquals(data.copyOf(realSize.toInt()), out.readBytes())
+        }
+    }
+
+    @Test
+    fun extractPartition_trimsAndVerifiesAgainstDeclaredSha256() = runBlocking {
+        val blockSize = 4096
+        val realSize = 1000L
+        val data = ByteArray(blockSize) { (it * 7 and 0xFF).toByte() }
+        // SHA-256 of the published (trimmed) image must match the manifest hash.
+        val expectedHash = HashUtil.sha256Hex(data.copyOf(realSize.toInt()))
+        val op = replaceOp(0, blockSize.toLong(), 0, 1)
+        val partition = UpdateMetadata.PartitionUpdate.newBuilder()
+            .setPartitionName("boot")
+            .addOperations(op)
+            .setNewPartitionInfo(
+                UpdateMetadata.PartitionInfo.newBuilder()
+                    .setSize(realSize)
+                    .setHash(com.google.protobuf.ByteString.copyFrom(hexToBytes(expectedHash)))
+            )
+            .build()
+
+        val payload = buildPayload(blockSize, listOf(partition), data)
+
+        RandomAccessFile(payload, "r").use { raf ->
+            val source = FileSeekableInput(raf)
+            val parsed = PayloadUtil.initPayload("payload.bin", source, 0L)
+            val out = File(tmp.root, "boot.img")
+            PayloadUtil.extractPartition(
+                parsed.deltaArchiveManifest.partitionsList[0], source, PartitionOutput(out), parsed
+            ) {}
+
+            assertEquals(realSize, out.length())
+            assertEquals(expectedHash, HashUtil.sha256Hex(out))
+        }
+    }
+
+    private fun hexToBytes(hex: String): ByteArray =
+        ByteArray(hex.length / 2) { hex.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+
+    @Test
+    fun extractMultiExtent_writesEachContiguousRunToItsOwnExtent() = runBlocking {
+        val blockSize = 4096
+        val blockA = ByteArray(blockSize) { 0xAA.toByte() }
+        val blockB = ByteArray(blockSize) { 0xBB.toByte() }
+        // One op contributes two blocks that must land in extents 0 and 3 (a gap in between).
+        val op = UpdateMetadata.InstallOperation.newBuilder()
+            .setType(UpdateMetadata.InstallOperation.Type.REPLACE)
+            .setDataOffset(0)
+            .setDataLength((2 * blockSize).toLong())
+            .addDstExtents(UpdateMetadata.Extent.newBuilder().setStartBlock(0).setNumBlocks(1))
+            .addDstExtents(UpdateMetadata.Extent.newBuilder().setStartBlock(3).setNumBlocks(1))
+            .build()
+        val payload = buildPayload(blockSize, listOf(partition("system", listOf(op))), blockA + blockB)
+
+        RandomAccessFile(payload, "r").use { raf ->
+            val source = FileSeekableInput(raf)
+            val parsed = PayloadUtil.initPayload("payload.bin", source, 0L)
+            val out = File(tmp.root, "system.img")
+            PayloadUtil.extractPartition(
+                parsed.deltaArchiveManifest.partitionsList[0], source, PartitionOutput(out), parsed
+            ) {}
+
+            val bytes = out.readBytes()
+            // Last written block is index 3, so the file must be 4 blocks long.
+            assertEquals(4 * blockSize, bytes.size)
+            assertArrayEquals(blockA, bytes.copyOfRange(0, blockSize))
+            // The untouched gap must stay zero, not receive block B.
+            assertArrayEquals(ByteArray(blockSize), bytes.copyOfRange(blockSize, 2 * blockSize))
+            assertArrayEquals(ByteArray(blockSize), bytes.copyOfRange(2 * blockSize, 3 * blockSize))
+            assertArrayEquals(blockB, bytes.copyOfRange(3 * blockSize, 4 * blockSize))
+        }
+    }
+
+    @Test
+    fun extractOperation_rejectsDataThatOverflowsItsExtents() = runBlocking {
+        val blockSize = 4096
+        // dst extent holds one block, but the op claims two blocks of data.
+        val data = ByteArray(2 * blockSize) { 0x11 }
+        val op = UpdateMetadata.InstallOperation.newBuilder()
+            .setType(UpdateMetadata.InstallOperation.Type.REPLACE)
+            .setDataOffset(0)
+            .setDataLength((2 * blockSize).toLong())
+            .addDstExtents(UpdateMetadata.Extent.newBuilder().setStartBlock(0).setNumBlocks(1))
+            .build()
+        val payload = buildPayload(blockSize, listOf(partition("boot", listOf(op))), data)
+
+        RandomAccessFile(payload, "r").use { raf ->
+            val source = FileSeekableInput(raf)
+            val parsed = PayloadUtil.initPayload("payload.bin", source, 0L)
+            val out = File(tmp.root, "boot.img")
+            assertThrows(IOException::class.java) {
+                runBlocking {
+                    PayloadUtil.extractPartition(
+                        parsed.deltaArchiveManifest.partitionsList[0], source, PartitionOutput(out), parsed
+                    ) {}
+                }
+            }
+            assertFalse("partial image must be removed", out.exists())
         }
     }
 

@@ -59,6 +59,8 @@ object ParseUtil {
             } catch (t: Throwable) {
                 if (InputSourceHolder.current === source) InputSourceHolder.clear()
                 source.close()
+                // Never swallow cancellation: propagating it keeps structured concurrency intact.
+                if (t is kotlinx.coroutines.CancellationException) throw t
                 val appContext = AppContextUtil.context
                 withContext(Dispatchers.Main) {
                     toast(appContext, t.message ?: appContext.getString(R.string.url_error_message))

@@ -152,8 +152,11 @@ class PayloadDumperViewModel : ViewModel() {
     }
 
     override fun onCleared() {
-        // Best-effort interrupt of an in-flight HTTP transfer before the scope is cancelled.
+        // Stop any in-flight dump before releasing the source, then close the parsed source so
+        // its file descriptor / HTTP connection does not leak once the ViewModel is gone.
+        cancelAllDumps()
         HttpUtil.cancel()
+        InputSourceHolder.clear()
         super.onCleared()
     }
 

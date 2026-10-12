@@ -112,9 +112,22 @@ class DumpUtil {
             SafUtil.writeIntoTree(context, treeUri, "$partitionName.img", workingFile)
         } else {
             // No SAF destination chosen yet: fall back to the app-private files dir so the dump
-            // always succeeds and can be exported later.
+            // always succeeds and can be exported later. Copy to a temporary sibling and rename,
+            // so a copy interrupted midway never leaves a truncated .img at the final path.
             val dest = File(context.getExternalFilesDir(null) ?: context.filesDir, "$partitionName.img")
-            SafUtil.writeToFile(workingFile, dest)
+            val temp = File(dest.parentFile, "${dest.name}.part")
+            try {
+                SafUtil.writeToFile(workingFile, temp)
+                if (dest.exists()) dest.delete()
+                if (!temp.renameTo(dest)) {
+                    // Fall back to a direct copy if rename is not permitted on this volume.
+                    SafUtil.writeToFile(temp, dest)
+                    temp.delete()
+                }
+            } catch (t: Throwable) {
+                temp.delete()
+                throw t
+            }
             Uri.fromFile(dest)
         }
     }

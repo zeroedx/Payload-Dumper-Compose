@@ -2,7 +2,7 @@
 
 在手机上直接解析和提取 OTA 包分区镜像的简单工具
 
-##功能特性
+## 功能特性
 
 支持从完整 OTA URL 直接下载并解析 payload.bin
 
@@ -12,7 +12,7 @@
 
 选择需要的分区，导出为 .img 文件
 
-## Screenshot:
+## 软件界面:
 
 <img src="screenshot/screenshot.jpg" alt="Screenshot">
 

@@ -5,6 +5,10 @@ import android.widget.Toast
 import com.rcmiku.payload.dumper.compose.R
 import com.rcmiku.payload.dumper.compose.model.Payload
 import com.rcmiku.payload.dumper.compose.utils.AppContextUtil.context
+import com.rcmiku.payload.dumper.compose.utils.MiscUtil.toHexString
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
 
 class DumpUtil {
 
@@ -13,6 +17,7 @@ class DumpUtil {
         payload: Payload,
         isPath: Boolean,
         onProgressUpdate: (Long) -> Unit,
+        onVerification: (Boolean) -> Unit = {},
         onFailure: (Boolean) -> Unit,
     ) {
         Toast.makeText(
@@ -29,45 +34,65 @@ class DumpUtil {
             "$it/$fileName"
         }
         val outputDir = customPath ?: (dumpDir.path + "/${appName}/${fileName}")
-        val dumpPath = dumpDir.name + "/" + appName + "/" + fileName
 
-        kotlin.runCatching {
-            payload.deltaArchiveManifest.partitionsList?.forEach {
-                if (it.partitionName == partitionName)
-                    if (dumpDir != null) {
-                        if (!isPath) {
-                            PayloadUtil.extractPartition(
-                                it,
-                                HttpUtil,
-                                outputDir,
-                                payload,
-                                onProgressUpdate
-                            )
-                        } else {
-                            PayloadUtil.extractPartition(
-                                it,
-                                RandomAccessFileUtil.raf,
-                                outputDir,
-                                payload,
-                                onProgressUpdate
-                            )
-                        }
-                    }
+        val partition = payload.deltaArchiveManifest.partitionsList
+            .firstOrNull { it.partitionName == partitionName }
+            ?: run {
+                Toast.makeText(context, "Partition not found", Toast.LENGTH_SHORT).show()
+                onFailure(false)
+                return
             }
-        }.onSuccess {
+
+        val result = runCatching {
+            PayloadUtil.extractPartition(
+                partition,
+                if (isPath) RandomAccessFileUtil.raf else HttpUtil,
+                outputDir,
+                payload,
+                onProgressUpdate
+            )
+        }
+
+        result.onFailure { error ->
+            Toast.makeText(context, error.message, Toast.LENGTH_SHORT).show()
+            onFailure(false)
+            return
+        }
+
+        // Verify the extracted image against the manifest's expected SHA-256.
+        val outputFile = File(outputDir, "$partitionName.img")
+        val expected =
+            if (partition.hasNewPartitionInfo()) partition.newPartitionInfo.hash.toHexString() else ""
+        if (expected.isBlank()) {
+            onVerification(true)
             Toast.makeText(
                 context,
-                context.getString(
-                    R.string.dump_success_message,
-                    dumpPath
-                ),
+                context.getString(R.string.dump_success_message, outputFile.path),
                 Toast.LENGTH_SHORT
             ).show()
-        }.onFailure { error ->
+            return
+        }
+
+        val verified = withContext(Dispatchers.IO) {
+            val actual = HashUtil.sha256Hex(outputFile)
+            HashUtil.matches(expected, actual)
+        }
+
+        if (verified) {
+            onVerification(true)
             Toast.makeText(
                 context,
-                error.message,
+                context.getString(R.string.dump_success_message, outputFile.path),
                 Toast.LENGTH_SHORT
+            ).show()
+        } else {
+            // A mismatching image is not a valid dump: remove it rather than mislead the user.
+            outputFile.delete()
+            onVerification(false)
+            Toast.makeText(
+                context,
+                context.getString(R.string.verify_failed_message),
+                Toast.LENGTH_LONG
             ).show()
             onFailure(false)
         }

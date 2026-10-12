@@ -16,6 +16,10 @@
     <string name="start_dump_message">Start Dump</string>
     <string name="dump">Dump</string>
     <string name="dump_success_message">Dump Successful: %s</string>
+    <string name="verify_failed_message">SHA-256 verification failed; the image was removed</string>
+    <string name="verify_pass_message">SHA-256 verified</string>
+    <string name="verify_fail_message">SHA-256 mismatch</string>
+    <string name="verified">Verified</string>
     <string name="done">Done</string>
     <string name="about_dialog_title">About</string>
     <string name="source_code">Source Code:&#160;</string>

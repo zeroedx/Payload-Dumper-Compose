@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.rcmiku.payload.dumper.compose.model.ArchiveInfo
 import com.rcmiku.payload.dumper.compose.model.PartitionInfo
 import com.rcmiku.payload.dumper.compose.model.Payload
+import com.rcmiku.payload.dumper.compose.model.VerifyState
 import com.rcmiku.payload.dumper.compose.utils.PayloadUtil
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -50,6 +51,16 @@ class PayloadDumperViewModel : ViewModel() {
         _partitionInfoList.value = _partitionInfoList.value.map {
             if (it.partitionName == partitionName) {
                 it.copy(isDownloading = isDownloading)
+            } else {
+                it
+            }
+        }
+    }
+
+    fun updateVerifyState(partitionName: String, verifyState: VerifyState) {
+        _partitionInfoList.value = _partitionInfoList.value.map {
+            if (it.partitionName == partitionName) {
+                it.copy(verifyState = verifyState)
             } else {
                 it
             }

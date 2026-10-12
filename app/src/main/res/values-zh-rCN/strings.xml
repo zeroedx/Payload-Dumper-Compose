@@ -16,6 +16,10 @@
     <string name="start_dump_message">开始提取</string>
     <string name="dump">提取</string>
     <string name="dump_success_message">提取成功：%s</string>
+    <string name="verify_failed_message">SHA-256 校验失败，已删除该镜像</string>
+    <string name="verify_pass_message">SHA-256 校验通过</string>
+    <string name="verify_fail_message">SHA-256 不匹配</string>
+    <string name="verified">已校验</string>
     <string name="done">已提取</string>
     <string name="about_dialog_title">关于</string>
     <string name="source_code">源代码：</string>

@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.lerp
 import com.rcmiku.payload.dumper.compose.R
 import com.rcmiku.payload.dumper.compose.model.PartitionInfo
+import com.rcmiku.payload.dumper.compose.model.VerifyState
 import com.rcmiku.payload.dumper.compose.ui.component.AboutDialog
 import com.rcmiku.payload.dumper.compose.ui.component.CustomUserAgent
 import com.rcmiku.payload.dumper.compose.ui.component.InputDialog
@@ -405,7 +406,14 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                                             partitionName = partitionInfo.partitionName,
                                             progress = progress / partitionInfo.size.toFloat()
                                         )
-                                    }, onFailure = { isDownload ->
+                                    },
+                                    onVerification = { ok ->
+                                        viewModel.updateVerifyState(
+                                            partitionName = partitionInfo.partitionName,
+                                            if (ok) VerifyState.Verified else VerifyState.Failed
+                                        )
+                                    },
+                                    onFailure = { isDownload ->
                                         viewModel.updateDownloadState(
                                             partitionName = partitionInfo.partitionName,
                                             isDownload

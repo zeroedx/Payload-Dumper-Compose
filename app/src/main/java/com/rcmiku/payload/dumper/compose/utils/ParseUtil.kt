@@ -24,10 +24,17 @@ class ParseUtil {
         } else if (pathOrUrl.isReadable()) {
             handleParsing(pathOrUrl, onSuccess) {
                 val payloadOffset = PayloadUtil.getPayloadOffset(pathOrUrl)
-                val raf = withContext(Dispatchers.IO) { RandomAccessFile(pathOrUrl, "rw") }
-                RandomAccessFileUtil.init(raf)
-                val fileName = File(pathOrUrl).name
-                PayloadUtil.initPayload(fileName, raf, payloadOffset)
+                // Read-only: parsing must never need a write handle on the user's OTA file.
+                val raf = withContext(Dispatchers.IO) { RandomAccessFile(pathOrUrl, "r") }
+                try {
+                    val payload = PayloadUtil.initPayload(File(pathOrUrl).name, raf, payloadOffset)
+                    RandomAccessFileUtil.init(raf)
+                    payload
+                } catch (t: Throwable) {
+                    // Parsing failed (e.g. delta payload rejected): do not leak the handle.
+                    runCatching { raf.close() }
+                    throw t
+                }
             }
         } else {
             showToast(R.string.url_error_message)

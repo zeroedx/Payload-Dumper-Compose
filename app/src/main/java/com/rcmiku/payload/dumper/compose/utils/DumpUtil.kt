@@ -6,6 +6,7 @@ import com.rcmiku.payload.dumper.compose.R
 import com.rcmiku.payload.dumper.compose.model.Payload
 import com.rcmiku.payload.dumper.compose.utils.AppContextUtil.context
 import com.rcmiku.payload.dumper.compose.utils.MiscUtil.toHexString
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -18,6 +19,7 @@ class DumpUtil {
         isPath: Boolean,
         onProgressUpdate: (Long) -> Unit,
         onVerification: (Boolean) -> Unit = {},
+        onCancelled: () -> Unit = {},
         onFailure: (Boolean) -> Unit,
     ) {
         Toast.makeText(
@@ -54,6 +56,13 @@ class DumpUtil {
         }
 
         result.onFailure { error ->
+            if (error is CancellationException) {
+                // A cancelled dump is not a failure; surface it separately and rethrow so the
+                // surrounding coroutine (viewModelScope job) finishes as cancelled.
+                if (!isPath) HttpUtil.cancel()
+                onCancelled()
+                throw error
+            }
             Toast.makeText(context, error.message, Toast.LENGTH_SHORT).show()
             onFailure(false)
             return

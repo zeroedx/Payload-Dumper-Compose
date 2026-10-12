@@ -42,7 +42,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.lerp
 import com.rcmiku.payload.dumper.compose.R
 import com.rcmiku.payload.dumper.compose.model.PartitionInfo
-import com.rcmiku.payload.dumper.compose.model.VerifyState
 import com.rcmiku.payload.dumper.compose.ui.component.AboutDialog
 import com.rcmiku.payload.dumper.compose.ui.component.CustomUserAgent
 import com.rcmiku.payload.dumper.compose.ui.component.InputDialog
@@ -52,7 +51,6 @@ import com.rcmiku.payload.dumper.compose.ui.component.PartitionInfoItem
 import com.rcmiku.payload.dumper.compose.ui.component.RequestPermissionDialog
 import com.rcmiku.payload.dumper.compose.ui.component.RomInfoCard
 import com.rcmiku.payload.dumper.compose.utils.AppContextUtil
-import com.rcmiku.payload.dumper.compose.utils.DumpUtil
 import com.rcmiku.payload.dumper.compose.utils.MiscUtil.getItemShape
 import com.rcmiku.payload.dumper.compose.utils.MiscUtil.getRealPathFromUri
 import com.rcmiku.payload.dumper.compose.utils.MiscUtil.isManageExternalStoragePermissionGranted
@@ -392,34 +390,10 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                             showDialog.value = true
                         },
                         onDownload = {
-                            viewModel.updateDownloadState(
-                                partitionName = partitionInfo.partitionName,
-                                true
-                            )
-                            coroutineScope.launch {
-                                DumpUtil().dump(
-                                    partitionName = partitionInfo.partitionName,
-                                    payload = payload.value!!,
-                                    isPath = payload.value!!.isPath,
-                                    onProgressUpdate = { progress ->
-                                        viewModel.updateProgress(
-                                            partitionName = partitionInfo.partitionName,
-                                            progress = progress / partitionInfo.size.toFloat()
-                                        )
-                                    },
-                                    onVerification = { ok ->
-                                        viewModel.updateVerifyState(
-                                            partitionName = partitionInfo.partitionName,
-                                            if (ok) VerifyState.Verified else VerifyState.Failed
-                                        )
-                                    },
-                                    onFailure = { isDownload ->
-                                        viewModel.updateDownloadState(
-                                            partitionName = partitionInfo.partitionName,
-                                            isDownload
-                                        )
-                                    })
-                            }
+                            viewModel.startDump(partitionInfo.partitionName)
+                        },
+                        onCancel = {
+                            viewModel.cancelDump(partitionInfo.partitionName)
                         })
                 }
             }

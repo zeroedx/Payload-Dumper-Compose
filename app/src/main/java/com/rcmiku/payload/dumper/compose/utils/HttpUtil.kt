@@ -1,6 +1,9 @@
 package com.rcmiku.payload.dumper.compose.utils
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.Headers
 import okhttp3.Interceptor
@@ -17,7 +20,12 @@ object HttpUtil {
     private lateinit var url: String
     private lateinit var fileName: String
     private var fileLength: Long = 0
+
+    @Volatile
     private var position: Long = 0
+
+    @Volatile
+    private var cancelled: Boolean = false
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
@@ -39,6 +47,7 @@ object HttpUtil {
     @Throws(IOException::class)
     suspend fun init(link: String) = withContext(Dispatchers.IO) {
         url = link
+        cancelled = false
         runCatching {
             val request = Request.Builder()
                 .url(link)
@@ -72,38 +81,64 @@ object HttpUtil {
         return fileName
     }
 
-    suspend fun read(byteArray: ByteArray): Int = withContext(Dispatchers.IO) {
-        val buffer = ByteArray(4 * 1024)
-        var bytesRead: Int
-        val requestBuilder = Request.Builder().url(url)
-        var currentPosition = position
-        var totalBytesRead = 0
+    /**
+     * Fills [byteArray] completely from [position], advancing the position by the bytes read.
+     *
+     * Unlike the previous single-pass implementation this loops until the array is full, so a
+     * partition image can never be written from a short read. Honours both coroutine cancellation
+     * and [cancel].
+     */
+    suspend fun readFully(byteArray: ByteArray, onBytes: (Int) -> Unit = {}): Int =
+        withContext(Dispatchers.IO) {
+            val buffer = ByteArray(64 * 1024)
+            var totalBytesRead = 0
+            var currentPosition = position
 
-        val rangeHeader = "bytes=$position-${position + byteArray.size - 1}"
-        val request = requestBuilder.addHeader("Range", rangeHeader).build()
+            while (totalBytesRead < byteArray.size) {
+                currentCoroutineContext().ensureActive()
+                if (cancelled) throw CancellationException("HTTP transfer cancelled")
 
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw IOException("Unexpected code $response")
-            val body: ResponseBody? = response.body
-            if (body != null) {
-                val inputStream = body.byteStream()
-                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                    if (totalBytesRead + bytesRead > byteArray.size) {
-                        val remainingSpace = byteArray.size - totalBytesRead
-                        System.arraycopy(buffer, 0, byteArray, totalBytesRead, remainingSpace)
-                        totalBytesRead += remainingSpace
-                        break
-                    } else {
-                        System.arraycopy(buffer, 0, byteArray, totalBytesRead, bytesRead)
-                        totalBytesRead += bytesRead
+                val end = currentPosition + (byteArray.size - totalBytesRead) - 1
+                val request = Request.Builder()
+                    .url(url)
+                    .addHeader("Range", "bytes=$currentPosition-$end")
+                    .build()
+
+                val call = client.newCall(request)
+                call.execute().use { response ->
+                    if (!response.isSuccessful) {
+                        throw IOException("Unexpected HTTP ${response.code} fetching $currentPosition-$end")
+                    }
+                    val body: ResponseBody = response.body
+                        ?: throw IOException("Empty response body")
+                    body.byteStream().use { inputStream ->
+                        var bytesRead = inputStream.read(buffer)
+                        while (totalBytesRead < byteArray.size && bytesRead != -1) {
+                            currentCoroutineContext().ensureActive()
+                            if (cancelled) throw CancellationException("HTTP transfer cancelled")
+                            val chunk = minOf(bytesRead, byteArray.size - totalBytesRead)
+                            System.arraycopy(buffer, 0, byteArray, totalBytesRead, chunk)
+                            totalBytesRead += chunk
+                            currentPosition += chunk
+                            onBytes(chunk)
+                            if (totalBytesRead < byteArray.size) {
+                                bytesRead = inputStream.read(buffer)
+                            }
+                        }
                     }
                 }
-                currentPosition += totalBytesRead
             }
+            position = currentPosition
+            return@withContext totalBytesRead
         }
-        position = currentPosition
-        return@withContext totalBytesRead
+
+    /** Best-effort interruption of an in-flight [readFully]. */
+    fun cancel() {
+        cancelled = true
     }
+
+    /** Convenience wrapper kept for callers that do not need progress callbacks. */
+    suspend fun read(byteArray: ByteArray): Int = readFully(byteArray)
 
     fun seek(bytePosition: Long) {
         if (bytePosition in 0 until fileLength) {

@@ -31,7 +31,12 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 @Composable
-fun PartitionInfoItem(partitionInfo: PartitionInfo, onClick: () -> Unit, onDownload: () -> Unit) {
+fun PartitionInfoItem(
+    partitionInfo: PartitionInfo,
+    onClick: () -> Unit,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit = {},
+) {
 
     Row(
         modifier = Modifier
@@ -70,6 +75,7 @@ fun PartitionInfoItem(partitionInfo: PartitionInfo, onClick: () -> Unit, onDownl
                     .height(30.dp)
                     .width(60.dp)
                     .align(Alignment.CenterVertically)
+                    .clickable(onClick = onCancel)
             ) {
                 CircularProgressIndicator(
                     progress = { partitionInfo.progress },

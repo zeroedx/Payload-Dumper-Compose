@@ -12,6 +12,8 @@ import com.rcmiku.payload.dumper.compose.utils.ZipFileUtil.locateCentralDirector
 import com.rcmiku.payload.dumper.compose.utils.ZipFileUtil.locateLocalFileHeader
 import com.rcmiku.payload.dumper.compose.utils.ZipFileUtil.locateLocalFileOffset
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -339,6 +341,9 @@ object PayloadUtil {
             try {
                 RandomAccessFile(outputFile, "rw").use { partOutput ->
                     metadataPartition.operationsList.forEach { operation ->
+                        // Cooperative cancellation: the loop body does blocking file/network IO,
+                        // so nothing else would interrupt it promptly.
+                        currentCoroutineContext().ensureActive()
                         when (input) {
                             is RandomAccessFile -> {
                                 extractFromLocal(

@@ -23,9 +23,9 @@ android {
 
     signingConfigs {
         create("release") {
-            // Keystore is intentionally NOT stored in the repository. Provide it via
-            // environment variables (e.g. CI secrets) when a signed release is required.
-            // Without them the release APK is packaged unsigned.
+            // Keystore is intentionally NOT stored in the repository. It is supplied at build
+            // time via environment variables (RELEASE_STORE_FILE, RELEASE_STORE_PASSWORD,
+            // RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD) so the private key never enters Git.
             val storePath = System.getenv("RELEASE_STORE_FILE")
             if (!storePath.isNullOrBlank()) {
                 storeFile = file(storePath)
@@ -48,10 +48,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // Only attach a signing config when a keystore was actually provided.
-            signingConfigs.getByName("release").takeIf { it.storeFile != null }?.let {
-                signingConfig = it
-            }
+            // Always attach the signing config. When RELEASE_STORE_FILE is absent the release
+            // build fails explicitly (a release APK can never silently fall back to unsigned),
+            // while debug/test builds are unaffected because they use their own signing config.
+            signingConfig = signingConfigs.getByName("release")
         }
         debug {
             applicationIdSuffix = ".debug"

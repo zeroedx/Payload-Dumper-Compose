@@ -57,7 +57,9 @@ object ZipFileUtil {
         val byteBuffer = ByteBuffer.wrap(byteArray).order(ByteOrder.LITTLE_ENDIAN)
         var localHeaderOffset: Long = -1
 
-        while (true) {
+        // Guard every read against the buffer end: a malformed or truncated central directory
+        // must yield -1 (entry not found) rather than a BufferUnderflowException.
+        while (byteBuffer.remaining() >= 46) {
             if (byteBuffer.getInt().toLong() == CENSIG) {
                 byteBuffer.position(byteBuffer.position() + 24)
                 val fileNameLength = byteBuffer.getShort().toUInt().toInt()
@@ -65,6 +67,9 @@ object ZipFileUtil {
                 val fileCommentLength = byteBuffer.getShort().toUInt().toInt()
                 byteBuffer.position(byteBuffer.position() + 8)
                 val localHeaderOffsetTemp = byteBuffer.getInt().toUInt().toLong()
+                if (fileNameLength < 0 || byteBuffer.remaining() < fileNameLength + extraFieldLength + fileCommentLength) {
+                    break
+                }
                 val fileNameBytes = ByteArray(fileNameLength)
                 byteBuffer.get(fileNameBytes)
                 if (fileName == String(fileNameBytes, Charsets.UTF_8)) {

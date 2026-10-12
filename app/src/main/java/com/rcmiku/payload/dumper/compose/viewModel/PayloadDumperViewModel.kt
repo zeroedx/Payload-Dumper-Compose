@@ -86,6 +86,15 @@ class PayloadDumperViewModel : ViewModel() {
         _search.value = partitionName
     }
 
+    private val _isParsing = MutableStateFlow(false)
+
+    /** Whether a parse operation is currently in progress (drives the progress indicator). */
+    val isParsing: StateFlow<Boolean> = _isParsing
+
+    fun setParsing(parsing: Boolean) {
+        _isParsing.value = parsing
+    }
+
     // --- Dump orchestration -------------------------------------------------------------
     // Extraction runs in viewModelScope, so it survives configuration changes but is cancelled
     // automatically when the ViewModel is cleared. Jobs are tracked per partition so a user can

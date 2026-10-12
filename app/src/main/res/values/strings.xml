@@ -5,6 +5,7 @@
     <string name="parse">Parse</string>
     <string name="parse_message">Start Parsing</string>
     <string name="parse_success_message">Parsing Successful</string>
+    <string name="parsing_message">Parsing…</string>
     <string name="url_error_message">URL is empty or in incorrect format</string>
     <string name="ota_info">OTA Info</string>
     <string name="image_list">Image List</string>

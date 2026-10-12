@@ -5,6 +5,7 @@
     <string name="parse">解析</string>
     <string name="parse_message">开始解析</string>
     <string name="parse_success_message">解析成功</string>
+    <string name="parsing_message">正在解析…</string>
     <string name="url_error_message">URL 为空或格式错误</string>
     <string name="ota_info">OTA 信息</string>
     <string name="image_list">镜像列表</string>

@@ -127,6 +127,7 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
     val isTopPopupExpanded = rememberSaveable { mutableStateOf(false) }
     val dropdownOptions = stringArrayResource(R.array.dropdownOptions)
     val searchValue = viewModel.search.collectAsState()
+    val isParsing by viewModel.isParsing.collectAsState()
 
     // Pick an OTA ZIP / payload.bin via SAF and remember the content Uri directly (no all-files
     // access needed).
@@ -359,18 +360,38 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                                 modifier = Modifier.weight(1f),
                                 text = stringResource(R.string.parse),
                                 onClick = {
-                                    coroutineScope.launch {
-                                        ParseUtil.loadPayload(
-                                            pathOrUrl = pathOrUrl.value,
-                                            onParsed = { payloadTemp ->
-                                                viewModel.initPayloadDumper(payload = payloadTemp)
-                                                focusManager.clearFocus()
-                                                keyboardController?.hide()
-                                            })
+                                    // Guard against duplicate taps launching overlapping parses.
+                                    if (!isParsing) {
+                                        coroutineScope.launch {
+                                            viewModel.setParsing(true)
+                                            try {
+                                                ParseUtil.loadPayload(
+                                                    pathOrUrl = pathOrUrl.value,
+                                                    onParsed = { payloadTemp ->
+                                                        viewModel.initPayloadDumper(payload = payloadTemp)
+                                                        focusManager.clearFocus()
+                                                        keyboardController?.hide()
+                                                    })
+                                            } finally {
+                                                viewModel.setParsing(false)
+                                            }
+                                        }
                                     }
                                 },
                                 colors = ButtonDefaults.textButtonColorsPrimary()
                             )
+                        }
+                        if (isParsing) {
+                            Column(modifier = Modifier.padding(top = 8.dp)) {
+                                androidx.compose.material3.LinearProgressIndicator(
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Text(
+                                    modifier = Modifier.padding(top = 8.dp),
+                                    text = stringResource(R.string.parsing_message),
+                                    color = MiuixTheme.colorScheme.onSecondaryVariant
+                                )
+                            }
                         }
                         archiveInfo.value?.let { RomInfoCard(archiveInfo = it) }
                     }

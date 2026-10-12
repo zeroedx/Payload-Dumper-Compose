@@ -25,7 +25,9 @@
     <string name="about_dialog_title">关于</string>
     <string name="source_code">源代码：</string>
     <string name="developer">开发者：</string>
-    <string name="author">rcmiku</string>
+    <string name="author">zeroedx</string>
+    <string name="repository_label">GitHub</string>
+    <string name="repository_url">https://github.com/zeroedx/Payload-Dumper-Compose</string>
     <string name="app_info">Dump Android Payload from OTA URL</string>
     <string name="file_size">文件大小</string>
     <string name="security_patch_level">安全补丁等级</string>

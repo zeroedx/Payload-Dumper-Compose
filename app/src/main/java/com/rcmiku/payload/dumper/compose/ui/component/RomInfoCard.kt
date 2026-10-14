@@ -28,6 +28,11 @@ fun RomInfoCard(archiveInfo: ArchiveInfo) {
                 .padding(top = 12.dp)
                 .padding(bottom = 16.dp)
         )
+        InfoTextView(
+            stringResource(R.string.device_model),
+            archiveInfo.deviceModel?.takeIf { it.isNotBlank() }
+                ?: stringResource(R.string.unknown_device)
+        )
         InfoTextView(stringResource(R.string.file_size), archiveInfo.fileSize.sizeIn())
         InfoTextView(stringResource(R.string.security_patch_level), archiveInfo.securityPatchLevel)
         InfoTextView(stringResource(R.string.file_name), archiveInfo.fileName)

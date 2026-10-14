@@ -30,6 +30,8 @@
     <string name="repository_label">GitHub</string>
     <string name="repository_url">https://github.com/zeroedx/Payload-Dumper-Compose</string>
     <string name="app_info">Dump Android Payload from OTA URL</string>
+    <string name="device_model">机型</string>
+    <string name="unknown_device">未知</string>
     <string name="file_size">文件大小</string>
     <string name="security_patch_level">安全补丁等级</string>
     <string name="file_name">文件名</string>

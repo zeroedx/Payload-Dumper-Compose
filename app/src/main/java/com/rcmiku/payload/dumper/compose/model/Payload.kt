@@ -45,5 +45,9 @@ data class FileInfo(
 data class ArchiveInfo(
     val fileName: String,
     val fileSize: Long,
-    val securityPatchLevel: String
+    val securityPatchLevel: String,
+    // The device model/codename. Not present in the payload manifest
+    // (DeltaArchiveManifest has no device field), so it is null until a source
+    // for it is added (e.g. parsing the OTA package metadata).
+    val deviceModel: String? = null
 )

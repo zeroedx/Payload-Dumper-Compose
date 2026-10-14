@@ -129,6 +129,10 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
     val searchValue = viewModel.search.collectAsState()
     val isParsing by viewModel.isParsing.collectAsState()
 
+    // Whether the link/file input section is visible. Hidden once a payload has been parsed
+    // successfully, restored when the user asks to change the input.
+    var showInput by rememberSaveable { mutableStateOf(true) }
+
     // Pick an OTA ZIP / payload.bin via SAF and remember the content Uri directly (no all-files
     // access needed).
     val launcher = rememberLauncherForActivityResult(
@@ -307,27 +311,99 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                             .padding(horizontal = 12.dp)
                             .padding(top = 12.dp)
                     ) {
-                        Card(
-                            modifier = Modifier.padding(bottom = 12.dp)
-                        ) {
-                            SuperArrow(
-                                leftAction = {
-                                    Box(
-                                        contentAlignment = Alignment.TopStart,
-                                        modifier = Modifier.padding(end = 16.dp)
-                                    ) {
-                                        Icon(
-                                            painter = painterResource(R.drawable.ic_local),
-                                            contentDescription = "local",
-                                            tint = Color.Unspecified
-                                        )
+                        if (showInput) {
+                            Card(
+                                modifier = Modifier.padding(bottom = 12.dp)
+                            ) {
+                                SuperArrow(
+                                    leftAction = {
+                                        Box(
+                                            contentAlignment = Alignment.TopStart,
+                                            modifier = Modifier.padding(end = 16.dp)
+                                        ) {
+                                            Icon(
+                                                painter = painterResource(R.drawable.ic_local),
+                                                contentDescription = "local",
+                                                tint = Color.Unspecified
+                                            )
+                                        }
+                                    },
+                                    title = stringResource(R.string.from_local),
+                                    onClick = {
+                                        launcher.launch(arrayOf("application/zip", "application/octet-stream"))
                                     }
-                                },
-                                title = stringResource(R.string.from_local),
-                                onClick = {
-                                    launcher.launch(arrayOf("application/zip", "application/octet-stream"))
+                                )
+                                SuperArrow(
+                                    leftAction = {
+                                        Box(
+                                            contentAlignment = Alignment.TopStart,
+                                            modifier = Modifier.padding(end = 16.dp)
+                                        ) {
+                                            Icon(
+                                                painter = painterResource(R.drawable.ic_url),
+                                                contentDescription = "url",
+                                                tint = Color.Unspecified
+                                            )
+                                        }
+                                    },
+                                    title = stringResource(R.string.from_url),
+                                    onClick = {
+                                        showInputDialog.value = true
+                                    }
+                                )
+                            }
+
+                            if (pathOrUrl.value.isNotEmpty())
+                                InputInfoCard(pathOrUrl = pathOrUrl.value)
+
+                            Row(
+                                modifier = Modifier
+                                    .padding(top = 12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                TextButton(
+                                    modifier = Modifier.weight(1f),
+                                    text = stringResource(R.string.parse),
+                                    onClick = {
+                                        // Guard against duplicate taps launching overlapping parses.
+                                        if (!isParsing) {
+                                            coroutineScope.launch {
+                                                viewModel.setParsing(true)
+                                                try {
+                                                    ParseUtil.loadPayload(
+                                                        pathOrUrl = pathOrUrl.value,
+                                                        onParsed = { payloadTemp ->
+                                                            viewModel.initPayloadDumper(payload = payloadTemp)
+                                                            // Parsed successfully: collapse the
+                                                            // input section so results get space.
+                                                            showInput = false
+                                                            focusManager.clearFocus()
+                                                            keyboardController?.hide()
+                                                        })
+                                                } finally {
+                                                    viewModel.setParsing(false)
+                                                }
+                                            }
+                                        }
+                                    },
+                                    colors = ButtonDefaults.textButtonColorsPrimary()
+                                )
+                            }
+                            if (isParsing) {
+                                Column(modifier = Modifier.padding(top = 8.dp)) {
+                                    androidx.compose.material3.LinearProgressIndicator(
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    Text(
+                                        modifier = Modifier.padding(top = 8.dp),
+                                        text = stringResource(R.string.parsing_message),
+                                        color = MiuixTheme.colorScheme.onSecondaryVariant
+                                    )
                                 }
-                            )
+                            }
+                        } else {
+                            // The input section is hidden after a successful parse; this entry
+                            // brings it back so the user can change the OTA link or file.
                             SuperArrow(
                                 leftAction = {
                                     Box(
@@ -336,62 +412,14 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                                     ) {
                                         Icon(
                                             painter = painterResource(R.drawable.ic_url),
-                                            contentDescription = "url",
+                                            contentDescription = "change link",
                                             tint = Color.Unspecified
                                         )
                                     }
                                 },
-                                title = stringResource(R.string.from_url),
-                                onClick = {
-                                    showInputDialog.value = true
-                                }
+                                title = stringResource(R.string.change_link),
+                                onClick = { showInput = true }
                             )
-                        }
-
-                        if (pathOrUrl.value.isNotEmpty())
-                            InputInfoCard(pathOrUrl = pathOrUrl.value)
-
-                        Row(
-                            modifier = Modifier
-                                .padding(top = 12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            TextButton(
-                                modifier = Modifier.weight(1f),
-                                text = stringResource(R.string.parse),
-                                onClick = {
-                                    // Guard against duplicate taps launching overlapping parses.
-                                    if (!isParsing) {
-                                        coroutineScope.launch {
-                                            viewModel.setParsing(true)
-                                            try {
-                                                ParseUtil.loadPayload(
-                                                    pathOrUrl = pathOrUrl.value,
-                                                    onParsed = { payloadTemp ->
-                                                        viewModel.initPayloadDumper(payload = payloadTemp)
-                                                        focusManager.clearFocus()
-                                                        keyboardController?.hide()
-                                                    })
-                                            } finally {
-                                                viewModel.setParsing(false)
-                                            }
-                                        }
-                                    }
-                                },
-                                colors = ButtonDefaults.textButtonColorsPrimary()
-                            )
-                        }
-                        if (isParsing) {
-                            Column(modifier = Modifier.padding(top = 8.dp)) {
-                                androidx.compose.material3.LinearProgressIndicator(
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                                Text(
-                                    modifier = Modifier.padding(top = 8.dp),
-                                    text = stringResource(R.string.parsing_message),
-                                    color = MiuixTheme.colorScheme.onSecondaryVariant
-                                )
-                            }
                         }
                         archiveInfo.value?.let { RomInfoCard(archiveInfo = it) }
                     }

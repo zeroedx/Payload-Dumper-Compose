@@ -37,6 +37,7 @@
     <string name="file_name">文件名</string>
     <string name="from_local">本地</string>
     <string name="from_url">链接</string>
+    <string name="change_link">更换链接或文件</string>
     <string name="input">输入</string>
     <string name="cancel">取消</string>
     <string name="confirm">确定</string>

@@ -50,7 +50,11 @@ object ParseUtil {
 
             try {
                 val payloadOffset = PayloadUtil.getPayloadOffset(source)
+                // Best-effort: a missing/corrupt metadata entry must never fail a valid parse.
+                val deviceModels = runCatching { OtaMetadataParser.readDeviceModels(source) }
+                    .getOrDefault(emptyList())
                 val payload = PayloadUtil.initPayload(fileName, source, payloadOffset)
+                    .copy(deviceModels = deviceModels)
                 InputSourceHolder.set(source)
                 withContext(Dispatchers.Main) {
                     onParsed(payload)

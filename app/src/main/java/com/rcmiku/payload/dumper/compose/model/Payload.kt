@@ -9,7 +9,10 @@ data class Payload(
     val dataOffset: Long,
     val blockSize: Int,
     val archiveSize: Long,
-    val isPath: Boolean
+    val isPath: Boolean,
+    // Device codename(s) from the OTA package metadata; empty for a bare payload.bin or a package
+    // whose metadata is missing/corrupt. Populated by ParseUtil after the payload is parsed.
+    val deviceModels: List<String> = emptyList()
 ) {
     /** Payload minor version. 0 means a full payload; anything else is incremental (delta). */
     val minorVersion: Int get() = deltaArchiveManifest.minorVersion
@@ -46,8 +49,12 @@ data class ArchiveInfo(
     val fileName: String,
     val fileSize: Long,
     val securityPatchLevel: String,
-    // The device model/codename. Not present in the payload manifest
-    // (DeltaArchiveManifest has no device field), so it is null until a source
-    // for it is added (e.g. parsing the OTA package metadata).
-    val deviceModel: String? = null
-)
+    // Device codenames the OTA targets (the `pre-device` value of the package metadata). The
+    // payload manifest carries no device field, so this is read from the OTA ZIP metadata. It is
+    // empty when the metadata is missing or has no valid device, and it can hold several entries
+    // for a multi-device package. Never derived from the file name or the build fingerprint.
+    val deviceModels: List<String> = emptyList()
+) {
+    /** Single display value: the first device, or null when none was found. */
+    val deviceModel: String? get() = deviceModels.firstOrNull()
+}

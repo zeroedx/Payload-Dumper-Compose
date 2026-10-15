@@ -30,8 +30,13 @@ fun RomInfoCard(archiveInfo: ArchiveInfo) {
         )
         InfoTextView(
             stringResource(R.string.device_model),
-            archiveInfo.deviceModel?.takeIf { it.isNotBlank() }
-                ?: stringResource(R.string.unknown_device)
+            if (archiveInfo.deviceModels.isNotEmpty()) {
+                // A package can target several devices; join them so none is silently hidden
+                // behind a single-looking value.
+                archiveInfo.deviceModels.joinToString(", ")
+            } else {
+                stringResource(R.string.unknown_device)
+            }
         )
         InfoTextView(stringResource(R.string.file_size), archiveInfo.fileSize.sizeIn())
         InfoTextView(stringResource(R.string.security_patch_level), archiveInfo.securityPatchLevel)

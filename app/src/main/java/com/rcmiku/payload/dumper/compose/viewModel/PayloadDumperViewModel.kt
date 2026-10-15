@@ -45,7 +45,8 @@ class PayloadDumperViewModel : ViewModel() {
             _archiveInfo.value = ArchiveInfo(
                 payload.fileName,
                 payload.archiveSize,
-                payload.deltaArchiveManifest.securityPatchLevel
+                payload.deltaArchiveManifest.securityPatchLevel,
+                payload.deviceModels
             )
             _partitionInfoList.value = PayloadUtil.getPartitionInfoList(payload)
             _cachePartitionInfoList.value = _partitionInfoList.value

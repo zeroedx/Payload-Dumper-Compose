@@ -10,10 +10,9 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -40,19 +39,19 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringArrayResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.lerp
 import com.rcmiku.payload.dumper.compose.R
 import com.rcmiku.payload.dumper.compose.model.PartitionInfo
 import com.rcmiku.payload.dumper.compose.ui.component.AboutDialog
 import com.rcmiku.payload.dumper.compose.ui.component.CustomUserAgent
-import com.rcmiku.payload.dumper.compose.ui.component.InputDialog
-import com.rcmiku.payload.dumper.compose.ui.component.InputInfoCard
 import com.rcmiku.payload.dumper.compose.ui.component.PartitionDialog
 import com.rcmiku.payload.dumper.compose.ui.component.PartitionInfoItem
 import com.rcmiku.payload.dumper.compose.ui.component.RomInfoCard
 import com.rcmiku.payload.dumper.compose.utils.AppContextUtil
 import com.rcmiku.payload.dumper.compose.utils.MiscUtil.getItemShape
+import com.rcmiku.payload.dumper.compose.utils.MiscUtil.isValidUrl
 import com.rcmiku.payload.dumper.compose.utils.OutputTreeHolder
 import com.rcmiku.payload.dumper.compose.utils.ParseUtil
 import com.rcmiku.payload.dumper.compose.utils.PreferencesUtil
@@ -83,6 +82,7 @@ import top.yukonga.miuix.kmp.basic.SearchBar
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.extra.DropdownImpl
 import top.yukonga.miuix.kmp.extra.SuperArrow
@@ -114,11 +114,11 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
     val pathOrUrl =
         rememberSaveable { mutableStateOf(PreferencesUtil().perfGet("pathOrUrl") ?: "") }
     val partitionInfoList by viewModel.cachePartitionInfoList.collectAsState()
+    val allPartitionInfoList by viewModel.allPartitionInfoList.collectAsState()
     val archiveInfo = viewModel.archiveInfo.collectAsState()
     val payload = viewModel.payload.collectAsState()
     val selectedPartitionInfo = remember { mutableStateOf<PartitionInfo?>(null) }
     val showDialog = remember { mutableStateOf(false) }
-    val showInputDialog = remember { mutableStateOf(false) }
     val showCustomUserAgentDialog = remember { mutableStateOf(false) }
     val showAboutDialog = remember { mutableStateOf(false) }
     var expanded by rememberSaveable { mutableStateOf(false) }
@@ -126,6 +126,19 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
     val isTopPopupExpanded = rememberSaveable { mutableStateOf(false) }
     val dropdownOptions = stringArrayResource(R.array.dropdownOptions)
     val searchValue = viewModel.search.collectAsState()
+    val isParsing by viewModel.isParsing.collectAsState()
+
+    // Whether the link/file input section is visible. Hidden once a payload has been parsed
+    // successfully, restored when the user asks to change the input.
+    var showInput by rememberSaveable { mutableStateOf(true) }
+    // Whether the inline URL text field is shown. Tapping "From URL" reveals it in place; the parse
+    // button sits in the same area so no extra navigation is needed. Kept apart from [showInput]:
+    // [showInput] controls the whole section (shown after "Change OTA link or file"), this one only
+    // the text field inside it.
+    var showUrlField by rememberSaveable { mutableStateOf(false) }
+    // Draft of the URL being typed. The committed value stays in [pathOrUrl] (persisted) until a
+    // successful parse, so an abandoned/edited draft never becomes the parsed input by accident.
+    var urlDraft by rememberSaveable { mutableStateOf("") }
 
     // Pick an OTA ZIP / payload.bin via SAF and remember the content Uri directly (no all-files
     // access needed).
@@ -139,6 +152,9 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                 }
                 pathOrUrl.value = it.toString()
                 PreferencesUtil().perfSet("pathOrUrl", pathOrUrl.value)
+                // A picked file replaces the URL flow; hide the text field so the input section
+                // (and the "Change OTA link or file" action) is restored next time.
+                showUrlField = false
             }
         }
     )
@@ -305,27 +321,159 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                             .padding(horizontal = 12.dp)
                             .padding(top = 12.dp)
                     ) {
-                        Card(
-                            modifier = Modifier.padding(bottom = 12.dp)
-                        ) {
-                            SuperArrow(
-                                leftAction = {
-                                    Box(
-                                        contentAlignment = Alignment.TopStart,
-                                        modifier = Modifier.padding(end = 16.dp)
-                                    ) {
-                                        Icon(
-                                            painter = painterResource(R.drawable.ic_local),
-                                            contentDescription = "local",
-                                            tint = Color.Unspecified
+                        if (showInput) {
+                            Card(
+                                modifier = Modifier.padding(bottom = 12.dp)
+                            ) {
+                                SuperArrow(
+                                    leftAction = {
+                                        Box(
+                                            contentAlignment = Alignment.TopStart,
+                                            modifier = Modifier.padding(end = 16.dp)
+                                        ) {
+                                            Icon(
+                                                painter = painterResource(R.drawable.ic_local),
+                                                contentDescription = "local",
+                                                tint = Color.Unspecified
+                                            )
+                                        }
+                                    },
+                                    title = stringResource(R.string.from_local),
+                                    onClick = {
+                                        launcher.launch(arrayOf("application/zip", "application/octet-stream"))
+                                    }
+                                )
+                                SuperArrow(
+                                    leftAction = {
+                                        Box(
+                                            contentAlignment = Alignment.TopStart,
+                                            modifier = Modifier.padding(end = 16.dp)
+                                        ) {
+                                            Icon(
+                                                painter = painterResource(R.drawable.ic_url),
+                                                contentDescription = "url",
+                                                tint = Color.Unspecified
+                                            )
+                                        }
+                                    },
+                                    title = stringResource(R.string.from_url),
+                                    onClick = {
+                                        // Reveal the inline URL field in place; no dialog, no navigation.
+                                        urlDraft = pathOrUrl.value
+                                        showUrlField = true
+                                    }
+                                )
+                            }
+
+                            // One input + parse area: the URL field in link mode, or the picked
+                            // file in local mode, with the parse button in the same card so input
+                            // and submit are a single interaction.
+                            if (showUrlField || pathOrUrl.value.isNotEmpty()) {
+                                Card(
+                                    modifier = Modifier.padding(bottom = 12.dp),
+                                    insideMargin = PaddingValues(horizontal = 12.dp)
+                                ) {
+                                    if (showUrlField) {
+                                        TextField(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(top = 12.dp)
+                                                .padding(bottom = 12.dp),
+                                            value = urlDraft,
+                                            onValueChange = { urlDraft = it },
+                                            // Long OTA links with query strings wrap instead of
+                                            // scrolling out of view; the value is stored verbatim,
+                                            // never split or rewritten.
+                                            minLines = 2,
+                                            label = stringResource(R.string.ota_url)
+                                        )
+                                    } else {
+                                        // A local file was picked; show it read-only so the user can
+                                        // confirm the source before parsing.
+                                        Text(
+                                            modifier = Modifier
+                                                .padding(top = 12.dp)
+                                                .padding(bottom = 12.dp),
+                                            text = pathOrUrl.value,
+                                            style = MiuixTheme.textStyles.body1,
+                                            fontWeight = FontWeight.Medium
                                         )
                                     }
-                                },
-                                title = stringResource(R.string.from_local),
-                                onClick = {
-                                    launcher.launch(arrayOf("application/zip", "application/octet-stream"))
+                                    TextButton(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(bottom = 12.dp),
+                                        text = stringResource(R.string.parse),
+                                        onClick = {
+                                            // Guard against duplicate taps launching overlapping
+                                            // parses, and against committing an empty/invalid link.
+                                            if (!isParsing) {
+                                                // In link mode validate the draft; a local pick is a
+                                                // content:// URI or path and only needs to be present.
+                                                val input = if (showUrlField) urlDraft else pathOrUrl.value
+                                                val valid = if (showUrlField) {
+                                                    input.isNotBlank() && input.isValidUrl()
+                                                } else {
+                                                    input.isNotBlank()
+                                                }
+                                                if (!valid) {
+                                                    Toast.makeText(
+                                                        AppContextUtil.context,
+                                                        AppContextUtil.context.getString(R.string.url_error_message),
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                } else {
+                                                    if (showUrlField) {
+                                                        // Commit the exact typed string (query
+                                                        // params and escapes preserved) so the
+                                                        // parser receives it unchanged.
+                                                        pathOrUrl.value = input
+                                                        PreferencesUtil().perfSet(
+                                                            "pathOrUrl",
+                                                            pathOrUrl.value
+                                                        )
+                                                    }
+                                                    coroutineScope.launch {
+                                                        viewModel.setParsing(true)
+                                                        try {
+                                                            ParseUtil.loadPayload(
+                                                                pathOrUrl = input,
+                                                                onParsed = { payloadTemp ->
+                                                                    viewModel.initPayloadDumper(payload = payloadTemp)
+                                                                    // Parsed successfully: collapse the
+                                                                    // input section so results get space.
+                                                                    showInput = false
+                                                                    showUrlField = false
+                                                                    focusManager.clearFocus()
+                                                                    keyboardController?.hide()
+                                                                })
+                                                        } finally {
+                                                            viewModel.setParsing(false)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        colors = ButtonDefaults.textButtonColorsPrimary()
+                                    )
                                 }
-                            )
+                            }
+
+                            if (isParsing) {
+                                Column(modifier = Modifier.padding(top = 8.dp)) {
+                                    androidx.compose.material3.LinearProgressIndicator(
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    Text(
+                                        modifier = Modifier.padding(top = 8.dp),
+                                        text = stringResource(R.string.parsing_message),
+                                        color = MiuixTheme.colorScheme.onSecondaryVariant
+                                    )
+                                }
+                            }
+                        } else {
+                            // The input section is hidden after a successful parse; this entry
+                            // brings it back so the user can change the OTA link or file.
                             SuperArrow(
                                 leftAction = {
                                     Box(
@@ -334,41 +482,21 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                                     ) {
                                         Icon(
                                             painter = painterResource(R.drawable.ic_url),
-                                            contentDescription = "url",
+                                            contentDescription = "change link",
                                             tint = Color.Unspecified
                                         )
                                     }
                                 },
-                                title = stringResource(R.string.from_url),
+                                title = stringResource(R.string.change_link),
                                 onClick = {
-                                    showInputDialog.value = true
+                                    // Reset to the neutral input section: clear the committed source
+                                    // so an old URL/file is never silently reused, and let the user
+                                    // pick local or link again.
+                                    pathOrUrl.value = ""
+                                    PreferencesUtil().perfSet("pathOrUrl", "")
+                                    showUrlField = false
+                                    showInput = true
                                 }
-                            )
-                        }
-
-                        if (pathOrUrl.value.isNotEmpty())
-                            InputInfoCard(pathOrUrl = pathOrUrl.value)
-
-                        Row(
-                            modifier = Modifier
-                                .padding(top = 12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            TextButton(
-                                modifier = Modifier.weight(1f),
-                                text = stringResource(R.string.parse),
-                                onClick = {
-                                    coroutineScope.launch {
-                                        ParseUtil.loadPayload(
-                                            pathOrUrl = pathOrUrl.value,
-                                            onParsed = { payloadTemp ->
-                                                viewModel.initPayloadDumper(payload = payloadTemp)
-                                                focusManager.clearFocus()
-                                                keyboardController?.hide()
-                                            })
-                                    }
-                                },
-                                colors = ButtonDefaults.textButtonColorsPrimary()
                             )
                         }
                         archiveInfo.value?.let { RomInfoCard(archiveInfo = it) }
@@ -410,9 +538,28 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                         })
                 }
             }
+
+            // Empty state: results exist but the active search keyword matches none of them.
+            if (searchValue.value.isNotBlank() &&
+                allPartitionInfoList.isNotEmpty() &&
+                partitionInfoList.isEmpty()
+            ) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = stringResource(R.string.search_no_results),
+                            color = MiuixTheme.colorScheme.onSecondaryVariant
+                        )
+                    }
+                }
+            }
         }
     }
-    InputDialog(showInputDialog, pathOrUrl)
     CustomUserAgent(showCustomUserAgentDialog)
     AboutDialog(showAboutDialog)
     selectedPartitionInfo.value?.let { PartitionDialog(showDialog, it) }

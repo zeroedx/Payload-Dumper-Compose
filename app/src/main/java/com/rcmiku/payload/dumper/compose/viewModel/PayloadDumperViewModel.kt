@@ -11,6 +11,7 @@ import com.rcmiku.payload.dumper.compose.utils.DumpUtil
 import com.rcmiku.payload.dumper.compose.utils.HttpUtil
 import com.rcmiku.payload.dumper.compose.utils.InputSourceHolder
 import com.rcmiku.payload.dumper.compose.utils.PayloadUtil
+import com.rcmiku.payload.dumper.compose.utils.filterPartitionInfoList
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -21,7 +22,13 @@ class PayloadDumperViewModel : ViewModel() {
 
     private val _partitionInfoList = MutableStateFlow<List<PartitionInfo>>(emptyList())
     private val _cachePartitionInfoList = MutableStateFlow<List<PartitionInfo>>(emptyList())
+
+    /** Full, unfiltered parsed partition list (never mutated by search). */
+    val allPartitionInfoList: StateFlow<List<PartitionInfo>> = _partitionInfoList
+
+    /** Filtered view used by the result list. */
     val cachePartitionInfoList: StateFlow<List<PartitionInfo>> = _cachePartitionInfoList
+
     private var _archiveInfo = MutableStateFlow<ArchiveInfo?>(null)
     val archiveInfo: StateFlow<ArchiveInfo?> = _archiveInfo
     private var _payload = MutableStateFlow<Payload?>(null)
@@ -31,11 +38,15 @@ class PayloadDumperViewModel : ViewModel() {
 
     fun initPayloadDumper(payload: Payload) {
         viewModelScope.launch {
+            // A new input replaces the previous result set; clear any stale search keyword so an
+            // old query can never hide the new partitions.
+            _search.value = ""
             _payload.value = payload
             _archiveInfo.value = ArchiveInfo(
                 payload.fileName,
                 payload.archiveSize,
-                payload.deltaArchiveManifest.securityPatchLevel
+                payload.deltaArchiveManifest.securityPatchLevel,
+                payload.deviceModels
             )
             _partitionInfoList.value = PayloadUtil.getPartitionInfoList(payload)
             _cachePartitionInfoList.value = _partitionInfoList.value
@@ -74,6 +85,15 @@ class PayloadDumperViewModel : ViewModel() {
 
     fun updateSearch(partitionName: String) {
         _search.value = partitionName
+    }
+
+    private val _isParsing = MutableStateFlow(false)
+
+    /** Whether a parse operation is currently in progress (drives the progress indicator). */
+    val isParsing: StateFlow<Boolean> = _isParsing
+
+    fun setParsing(parsing: Boolean) {
+        _isParsing.value = parsing
     }
 
     // --- Dump orchestration -------------------------------------------------------------
@@ -163,9 +183,7 @@ class PayloadDumperViewModel : ViewModel() {
     private fun updateBySearch() {
         viewModelScope.launch {
             combine(_partitionInfoList, _search) { partitionList, search ->
-                partitionList.filter {
-                    if (search.isNotEmpty()) it.partitionName.contains(search) else true
-                }
+                filterPartitionInfoList(partitionList, search)
             }.collect { filterList ->
                 _cachePartitionInfoList.value = filterList
             }

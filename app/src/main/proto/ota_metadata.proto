@@ -1,0 +1,40 @@
+// OTA package metadata, read from the `META-INF/com/android/metadata.pb` entry of an OTA ZIP.
+//
+// Field numbers and semantics follow AOSP `build/tools/releasetools/ota_metadata.proto`. Only the
+// subset needed to read the target device(s) is declared here, but the field numbers must match the
+// upstream schema so unknown fields are ignored and the known ones decode correctly. `pre-device`
+// in the legacy text metadata is the joined `precondition.device` list.
+syntax = "proto3";
+
+package chromeos_update_engine;
+
+option java_package = "com.rcmiku.payload.dumper.compose.proto";
+option java_outer_classname = "OtaPackageMetadata";
+option optimize_for = LITE_RUNTIME;
+
+message DeviceState {
+  // ro.product.device values. Multiple entries mean the package supports multiple devices.
+  repeated string device = 1;
+  // Build fingerprint(s); deliberately not used as a device model.
+  repeated string build = 2;
+  string build_incremental = 3;
+  int64 timestamp = 4;
+  string sdk_level = 5;
+  string security_patch_level = 6;
+}
+
+message OtaMetadata {
+  enum OtaType {
+    UNKNOWN = 0;
+    AB = 1;
+    BLOCK = 2;
+    BRICK = 3;
+  }
+  OtaType type = 1;
+  bool wipe = 2;
+  bool downgrade = 3;
+  // The required device state to install the package; its `device` list is `pre-device`.
+  DeviceState precondition = 5;
+  // The expected device state after the update; its `device` list is `post-device`.
+  DeviceState postcondition = 6;
+}

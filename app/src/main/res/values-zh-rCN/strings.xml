@@ -5,6 +5,7 @@
     <string name="parse">解析</string>
     <string name="parse_message">开始解析</string>
     <string name="parse_success_message">解析成功</string>
+    <string name="parsing_message">正在解析…</string>
     <string name="url_error_message">URL 为空或格式错误</string>
     <string name="ota_info">OTA 信息</string>
     <string name="image_list">镜像列表</string>
@@ -25,13 +26,18 @@
     <string name="about_dialog_title">关于</string>
     <string name="source_code">源代码：</string>
     <string name="developer">开发者：</string>
-    <string name="author">rcmiku</string>
+    <string name="author">zeroedx</string>
+    <string name="repository_label">GitHub</string>
+    <string name="repository_url">https://github.com/zeroedx/Payload-Dumper-Compose</string>
     <string name="app_info">Dump Android Payload from OTA URL</string>
+    <string name="device_model">机型</string>
+    <string name="unknown_device">未知</string>
     <string name="file_size">文件大小</string>
     <string name="security_patch_level">安全补丁等级</string>
     <string name="file_name">文件名</string>
     <string name="from_local">本地</string>
     <string name="from_url">链接</string>
+    <string name="change_link">更换链接或文件</string>
     <string name="input">输入</string>
     <string name="cancel">取消</string>
     <string name="confirm">确定</string>
@@ -40,6 +46,7 @@
     <string name="permission_granted">权限已授予</string>
     <string name="permission_not_granted">权限未授予</string>
     <string name="search">搜索</string>
+    <string name="search_no_results">没有找到匹配的结果</string>
     <string name="select_output_folder">请选择提取镜像的输出目录</string>
     <string name="custom_user_agent_setting">自定义UA设置</string>
     <string name="custom_user_agent">自定义UA</string>

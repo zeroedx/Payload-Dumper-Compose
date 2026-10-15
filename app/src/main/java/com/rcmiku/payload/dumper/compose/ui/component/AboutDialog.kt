@@ -1,23 +1,23 @@
 package com.rcmiku.payload.dumper.compose.ui.component
 
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.text.ClickableText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.MutableState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.fromHtml
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -30,6 +30,19 @@ import top.yukonga.miuix.kmp.extra.SuperDialog
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.utils.MiuixPopupUtil.Companion.dismissDialog
 
+/** Link annotation tag used to make the repository URL clickable. */
+private const val URL_TAG = "URL"
+
+/** Opens [url] in an external viewer; does nothing (and never crashes) if none is available. */
+private fun openExternalUrl(url: String) {
+    runCatching {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        AppContextUtil.context.startActivity(intent)
+    }
+}
+
 @Composable
 fun AboutDialog(showDialog: MutableState<Boolean>) {
 
@@ -37,6 +50,9 @@ fun AboutDialog(showDialog: MutableState<Boolean>) {
     val packageManager: PackageManager = context.packageManager
     val applicationInfo = context.applicationInfo
     val icon = packageManager.getApplicationIcon(applicationInfo)
+
+    val repositoryUrl = stringResource(R.string.repository_url)
+    val repositoryLabel = stringResource(R.string.repository_label)
 
     SuperDialog(
         show = showDialog,
@@ -69,30 +85,30 @@ fun AboutDialog(showDialog: MutableState<Boolean>) {
         val descriptionString = buildAnnotatedString {
             append(stringResource(R.string.developer)); append(stringResource(R.string.author))
             append("\n")
-            append(stringResource(R.string.source_code)).apply {
-                append(
-                    AnnotatedString.Companion.fromHtml(
-                        htmlString = "<b><a href=\"https://github.com/rcmiku/Payload-Dumper-Compose\">GitHub</a></b>",
-                        linkStyles = TextLinkStyles(
-                            style = SpanStyle(
-                                textDecoration = TextDecoration.Underline,
-                                color = MiuixTheme.colorScheme.primary
-                            ),
-                            pressedStyle = SpanStyle(
-                                textDecoration = TextDecoration.Underline,
-                                color = MiuixTheme.colorScheme.primary,
-                                background = MiuixTheme.colorScheme.secondaryContainer
-                            )
-                        ),
-                    )
+            append(stringResource(R.string.source_code))
+            pushStringAnnotation(tag = URL_TAG, annotation = repositoryUrl)
+            pushStyle(
+                SpanStyle(
+                    color = MiuixTheme.colorScheme.primary,
+                    textDecoration = TextDecoration.Underline,
+                    fontWeight = FontWeight.Medium
                 )
-            }
+            )
+            append(repositoryLabel)
+            pop()
+            pop()
             append("\n\n")
             append(stringResource(R.string.app_info))
         }
-        Text(
+        ClickableText(
             modifier = Modifier.padding(top = 10.dp),
-            text = descriptionString
+            text = descriptionString,
+            style = MiuixTheme.textStyles.body1,
+            onClick = { offset ->
+                descriptionString.getStringAnnotations(URL_TAG, offset, offset)
+                    .firstOrNull()
+                    ?.let { openExternalUrl(it.item) }
+            }
         )
     }
 }

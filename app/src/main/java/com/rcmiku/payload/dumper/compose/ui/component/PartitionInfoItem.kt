@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -33,31 +34,38 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 @Composable
 fun PartitionInfoItem(
     partitionInfo: PartitionInfo,
+    selected: Boolean,
     onClick: () -> Unit,
+    onSelectedChange: (Boolean) -> Unit,
     onDownload: () -> Unit,
     onCancel: () -> Unit = {},
 ) {
 
     Row(
         modifier = Modifier
-            .clickable(
-                onClick = {
-                    onClick()
-                }
-            )
             .padding(horizontal = 12.dp)
             .fillMaxWidth()
             .height(64.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        // Selecting a partition is for batch extraction; the row body still opens the detail
+        // dialog, so the two gestures do not collide.
+        Checkbox(
+            checked = selected,
+            onCheckedChange = onSelectedChange,
+        )
         Image(
+            modifier = Modifier
+                .size(40.dp)
+                .clickable(onClick = onClick),
             painter = painterResource(R.drawable.ic_img),
-            contentDescription = partitionInfo.partitionName,
-            modifier = Modifier.size(40.dp)
+            contentDescription = partitionInfo.partitionName
         )
         Spacer(modifier = Modifier.width(12.dp))
         Column(
-            modifier = Modifier.weight(1f)
+            modifier = Modifier
+                .weight(1f)
+                .clickable(onClick = onClick)
         ) {
             Text(
                 text = partitionInfo.partitionName,
@@ -68,6 +76,21 @@ fun PartitionInfoItem(
                 style = MiuixTheme.textStyles.subtitle,
                 color = MiuixTheme.colorScheme.onSurfaceContainerVariant
             )
+        }
+        if (partitionInfo.needsSourceImage) {
+            Badge(
+                modifier = Modifier
+                    .padding(end = 6.dp)
+                    .height(24.dp)
+                    .align(Alignment.CenterVertically),
+                containerColor = MiuixTheme.colorScheme.secondaryContainer,
+            ) {
+                Text(
+                    text = stringResource(R.string.delta_badge),
+                    style = MiuixTheme.textStyles.subtitle,
+                    color = MiuixTheme.colorScheme.onSecondaryContainer,
+                )
+            }
         }
         if (partitionInfo.isDownloading && partitionInfo.progress < 1f) {
             Box(

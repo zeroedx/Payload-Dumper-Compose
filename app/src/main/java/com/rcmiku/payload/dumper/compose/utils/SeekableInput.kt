@@ -25,6 +25,16 @@ interface SeekableInput {
     /** Reads exactly [buffer].size bytes or throws. */
     suspend fun readFully(buffer: ByteArray)
 
+    /**
+     * Reads exactly [length] bytes starting at [offset] into [dest] at [destOffset], leaving
+     * [position] untouched.
+     *
+     * This is a blocking, positioned read: parallel partition extraction reads several disjoint
+     * ranges of the same source at once, so implementations must be safe to call concurrently and
+     * must not depend on shared cursor state.
+     */
+    fun readAt(offset: Long, dest: ByteArray, destOffset: Int, length: Int)
+
     /** Whether this source is a local file (used to decide the persisted `isPath` flag). */
     val isLocal: Boolean
 
@@ -35,13 +45,25 @@ interface SeekableInput {
 /** [SeekableInput] backed by a [RandomAccessFile]. */
 class FileSeekableInput(private val raf: RandomAccessFile) : SeekableInput {
 
+    /** Guards the shared file cursor so positioned reads and cursor-based reads never interleave. */
+    private val lock = Any()
+
     override fun length(): Long = raf.length()
 
-    override fun seek(position: Long) = raf.seek(position)
+    override fun seek(position: Long) = synchronized(lock) { raf.seek(position) }
 
-    override fun position(): Long = raf.filePointer
+    override fun position(): Long = synchronized(lock) { raf.filePointer }
 
-    override suspend fun readFully(buffer: ByteArray) = raf.readFully(buffer)
+    override suspend fun readFully(buffer: ByteArray) = synchronized(lock) {
+        raf.readFully(buffer)
+    }
+
+    override fun readAt(offset: Long, dest: ByteArray, destOffset: Int, length: Int) {
+        synchronized(lock) {
+            raf.seek(offset)
+            raf.readFully(dest, destOffset, length)
+        }
+    }
 
     override val isLocal: Boolean = true
 
@@ -58,6 +80,7 @@ class UriSeekableInput(context: Context, private val uri: Uri) : SeekableInput {
         ?: throw IOException("Unable to open $uri")
     private val fis = java.io.FileInputStream(pfd.fileDescriptor)
     private val stream = NonClosingInputStream(fis)
+    private val lock = Any()
     private val totalLength: Long = pfd.statSize.let { if (it >= 0) it else -1L }
         .takeIf { it >= 0 }
         ?: appContext.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length }
@@ -66,15 +89,25 @@ class UriSeekableInput(context: Context, private val uri: Uri) : SeekableInput {
     override fun length(): Long = totalLength
 
     override fun seek(position: Long) {
-        fis.channel.position(position)
+        synchronized(lock) { fis.channel.position(position) }
     }
 
-    override fun position(): Long = fis.channel.position()
+    override fun position(): Long = synchronized(lock) { fis.channel.position() }
 
-    override suspend fun readFully(buffer: ByteArray) {
+    override suspend fun readFully(buffer: ByteArray) = synchronized(lock) {
+        readInto(buffer, 0, buffer.size)
+    }
+
+    override fun readAt(offset: Long, dest: ByteArray, destOffset: Int, length: Int) =
+        synchronized(lock) {
+            fis.channel.position(offset)
+            readInto(dest, destOffset, length)
+        }
+
+    private fun readInto(dest: ByteArray, destOffset: Int, length: Int) {
         var read = 0
-        while (read < buffer.size) {
-            val n = stream.read(buffer, read, buffer.size - read)
+        while (read < length) {
+            val n = stream.read(dest, destOffset + read, length - read)
             if (n < 0) throw IOException("Unexpected end of $uri")
             read += n
         }

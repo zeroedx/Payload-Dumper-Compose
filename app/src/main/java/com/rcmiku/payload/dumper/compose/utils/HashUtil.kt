@@ -28,6 +28,24 @@ object HashUtil {
         return digest.digest(bytes).joinToString("") { "%02x".format(it.toInt() and 0xFF) }
     }
 
+    /**
+     * Streams a whole [SeekableInput] and returns its raw SHA-256 digest. Reads through the
+     * positioned [SeekableInput.readAt], so it does not disturb any other reader's cursor.
+     */
+    fun sha256Bytes(input: SeekableInput): ByteArray {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val length = input.length()
+        val buffer = ByteArray(BUFFER_SIZE)
+        var offset = 0L
+        while (offset < length) {
+            val chunk = minOf(length - offset, BUFFER_SIZE.toLong()).toInt()
+            input.readAt(offset, buffer, 0, chunk)
+            digest.update(buffer, 0, chunk)
+            offset += chunk
+        }
+        return digest.digest()
+    }
+
     /** Case-insensitive comparison of two hex digests. */
     fun matches(expectedHex: String, actualHex: String): Boolean =
         expectedHex.trim().equals(actualHex.trim(), ignoreCase = true)

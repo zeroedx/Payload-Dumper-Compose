@@ -39,6 +39,11 @@ class OtaMetadataParserTest {
             System.arraycopy(bytes, pos, buffer, 0, buffer.size)
             pos += buffer.size
         }
+
+        override fun readAt(offset: Long, dest: ByteArray, destOffset: Int, length: Int) {
+            System.arraycopy(bytes, offset.toInt(), dest, destOffset, length)
+        }
+
         override val isLocal: Boolean = true
     }
 

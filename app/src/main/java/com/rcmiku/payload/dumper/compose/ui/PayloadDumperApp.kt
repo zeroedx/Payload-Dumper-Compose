@@ -13,6 +13,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -45,10 +46,10 @@ import androidx.compose.ui.util.lerp
 import com.rcmiku.payload.dumper.compose.R
 import com.rcmiku.payload.dumper.compose.model.PartitionInfo
 import com.rcmiku.payload.dumper.compose.ui.component.AboutDialog
-import com.rcmiku.payload.dumper.compose.ui.component.CustomUserAgent
 import com.rcmiku.payload.dumper.compose.ui.component.PartitionDialog
 import com.rcmiku.payload.dumper.compose.ui.component.PartitionInfoItem
 import com.rcmiku.payload.dumper.compose.ui.component.RomInfoCard
+import com.rcmiku.payload.dumper.compose.ui.component.SourceImageSection
 import com.rcmiku.payload.dumper.compose.utils.AppContextUtil
 import com.rcmiku.payload.dumper.compose.utils.MiscUtil.getItemShape
 import com.rcmiku.payload.dumper.compose.utils.MiscUtil.isValidUrl
@@ -119,8 +120,15 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
     val payload = viewModel.payload.collectAsState()
     val selectedPartitionInfo = remember { mutableStateOf<PartitionInfo?>(null) }
     val showDialog = remember { mutableStateOf(false) }
-    val showCustomUserAgentDialog = remember { mutableStateOf(false) }
     val showAboutDialog = remember { mutableStateOf(false) }
+    val outputTreeUri by viewModel.outputTreeUri.collectAsState()
+    val sourceImagePartitions by viewModel.sourceImagePartitions.collectAsState()
+    val batchProgress by viewModel.batchProgress.collectAsState()
+    // Partitions the user has checked for batch extraction. Kept in the composable (not the
+    // ViewModel) because it is pure UI state; the ViewModel only learns about it on "Dump Selected".
+    var selection by remember { mutableStateOf(setOf<String>()) }
+    // Partition awaiting an imported old image (drives the OpenDocument launcher).
+    var pendingSourcePartition by remember { mutableStateOf<String?>(null) }
     var expanded by rememberSaveable { mutableStateOf(false) }
     val showTopPopup = rememberSaveable { mutableStateOf(false) }
     val isTopPopupExpanded = rememberSaveable { mutableStateOf(false) }
@@ -176,9 +184,26 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
         }
     }
 
+    // Import an old partition image for delta extraction; remember which partition it is for.
+    val sourceImageLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        val partition = pendingSourcePartition
+        pendingSourcePartition = null
+        if (uri != null && partition != null) {
+            runCatching {
+                AppContextUtil.context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            viewModel.setSourceImage(partition, uri)
+        }
+    }
+
     // First use (or a revoked/lost grant): guide the user to authorise the default Download folder.
     LaunchedEffect(Unit) {
-        if (viewModel.outputTreeUri() == null) {
+        if (outputTreeUri == null) {
             Toast.makeText(
                 AppContextUtil.context,
                 AppContextUtil.context.getString(R.string.select_output_folder),
@@ -219,11 +244,10 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                                             dismissPopup(showTopPopup)
                                             isTopPopupExpanded.value = false
                                             when (index) {
-                                                0 -> showCustomUserAgentDialog.value = true
-                                                1 -> folderPickerLauncher.launch(
-                                                    viewModel.outputTreeUri() ?: SafUtil.downloadsTreeUri()
+                                                0 -> folderPickerLauncher.launch(
+                                                    outputTreeUri ?: SafUtil.downloadsTreeUri()
                                                 )
-                                                2 -> showAboutDialog.value = true
+                                                1 -> showAboutDialog.value = true
                                             }
                                         },
                                         index = index
@@ -500,10 +524,66 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                             )
                         }
                         archiveInfo.value?.let { RomInfoCard(archiveInfo = it) }
+                        val deltaPartitions = allPartitionInfoList
+                            .filter { it.needsSourceImage }
+                            .map { it.partitionName }
+                        SourceImageSection(
+                            neededPartitions = deltaPartitions,
+                            suppliedPartitions = sourceImagePartitions,
+                            onImport = { name ->
+                                pendingSourcePartition = name
+                                sourceImageLauncher.launch(arrayOf("application/octet-stream"))
+                            },
+                            onRemove = { name -> viewModel.removeSourceImage(name) },
+                        )
                     }
                 }
                 if (partitionInfoList.isNotEmpty())
                     SmallTitle(stringResource(R.string.image_list))
+            }
+
+            // Batch toolbar: select all / clear, and dump the checked partitions in one action.
+            if (allPartitionInfoList.isNotEmpty()) {
+                item {
+                    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            val allNames = allPartitionInfoList.map { it.partitionName }
+                            TextButton(
+                                modifier = Modifier.weight(1f),
+                                text = if (selection.size == allNames.size && allNames.isNotEmpty())
+                                    stringResource(R.string.clear_selection)
+                                else stringResource(R.string.select_all),
+                                onClick = {
+                                    selection = if (selection.size == allNames.size && allNames.isNotEmpty()) {
+                                        emptySet()
+                                    } else {
+                                        allNames.toSet()
+                                    }
+                                },
+                            )
+                            TextButton(
+                                modifier = Modifier.weight(1f),
+                                text = stringResource(R.string.dump_selected, selection.size),
+                                enabled = selection.isNotEmpty(),
+                                onClick = {
+                                    selection.forEach { viewModel.startDump(it) }
+                                },
+                            )
+                        }
+                        // Overall progress across the partitions currently being extracted.
+                        if (batchProgress > 0f && batchProgress < 1f) {
+                            androidx.compose.material3.LinearProgressIndicator(
+                                progress = { batchProgress },
+                                modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                            )
+                        }
+                    }
+                }
             }
 
             itemsIndexed(partitionInfoList) { index, partitionInfo ->
@@ -526,9 +606,17 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                 {
                     PartitionInfoItem(
                         partitionInfo = partitionInfo,
+                        selected = partitionInfo.partitionName in selection,
                         onClick = {
                             selectedPartitionInfo.value = partitionInfo
                             showDialog.value = true
+                        },
+                        onSelectedChange = { checked ->
+                            selection = if (checked) {
+                                selection + partitionInfo.partitionName
+                            } else {
+                                selection - partitionInfo.partitionName
+                            }
                         },
                         onDownload = {
                             viewModel.startDump(partitionInfo.partitionName)
@@ -560,7 +648,6 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
             }
         }
     }
-    CustomUserAgent(showCustomUserAgentDialog)
     AboutDialog(showAboutDialog)
     selectedPartitionInfo.value?.let { PartitionDialog(showDialog, it) }
 }

@@ -10,6 +10,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.nio.file.FileAlreadyExistsException
 
 /**
  * Orchestrates one partition dump: extract into a private working file, verify its SHA-256, then
@@ -25,6 +26,7 @@ class DumpUtil {
         payload: Payload,
         source: SeekableInput,
         outputTreeUri: Uri?,
+        oldPartition: SeekableInput? = null,
         onProgressUpdate: (Long) -> Unit,
         onVerification: (Boolean) -> Unit = {},
         onCancelled: () -> Unit = {},
@@ -50,6 +52,7 @@ class DumpUtil {
                 source,
                 output,
                 payload,
+                oldPartition,
                 onProgressUpdate,
             )
         }
@@ -59,6 +62,12 @@ class DumpUtil {
             if (error is CancellationException) {
                 output.cleanup()
                 onCancelled()
+                throw error
+            }
+            // A changed resource cannot be fixed by retrying; surface it so the caller can prompt
+            // a re-parse instead of leaving a half-extracted image around.
+            if (error is ResourceChangedException) {
+                onFailure(false)
                 throw error
             }
             Toast.makeText(context, error.message, Toast.LENGTH_SHORT).show()
@@ -95,7 +104,12 @@ class DumpUtil {
         output.cleanup()
 
         published.onFailure { error ->
-            Toast.makeText(context, error.message, Toast.LENGTH_SHORT).show()
+            val message = if (error is FileAlreadyExistsException) {
+                context.getString(R.string.file_already_exists_message, "$partitionName.img")
+            } else {
+                error.message
+            }
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
             onFailure(false)
             return
         }
@@ -109,7 +123,7 @@ class DumpUtil {
 
     private suspend fun publish(workingFile: File, partitionName: String, treeUri: Uri?): Uri = withContext(Dispatchers.IO) {
         if (treeUri != null) {
-            SafUtil.writeIntoTree(context, treeUri, "$partitionName.img", workingFile)
+            SafUtil.publishIntoTree(context, treeUri, "$partitionName.img", workingFile)
         } else {
             // No SAF destination chosen yet: fall back to the app-private files dir so the dump
             // always succeeds and can be exported later. Copy to a temporary sibling and rename,

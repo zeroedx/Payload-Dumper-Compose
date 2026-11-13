@@ -15,8 +15,8 @@ android {
         applicationId = "com.rcmiku.payload.dumper.compose"
         minSdk = 30
         targetSdk = 35
-        versionCode = 17
-        versionName = "1.7"
+        versionCode = 20
+        versionName = "2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -106,6 +106,7 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.protobuf.kotlin.lite)
     implementation(libs.commons.compress)
+    implementation(libs.aircompressor)
     implementation(libs.xz)
     implementation(libs.miuix)
     implementation(libs.haze)

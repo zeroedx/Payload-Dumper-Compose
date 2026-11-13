@@ -19,8 +19,10 @@ accompanist = "0.37.0"
 robolectric = "4.14.1"
 mockwebserver = "4.12.0"
 coroutinesTest = "1.9.0"
+aircompressor = "2.0.3"
 
 [libraries]
+aircompressor = { module = "io.airlift:aircompressor", version.ref = "aircompressor" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 commons-compress = { module = "org.apache.commons:commons-compress", version.ref = "commonsCompress" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }

@@ -32,6 +32,9 @@ data class PartitionInfo(
     val size: Long,
     val rawSize: Long,
     val sha256: String,
+    // True when applying this partition reads the old partition image (delta update), so the user
+    // must supply that image before it can be extracted.
+    val needsSourceImage: Boolean = false,
     val isDownloading: Boolean = false,
     val progress: Float = 0f,
     val verifyState: VerifyState = VerifyState.Unverified,

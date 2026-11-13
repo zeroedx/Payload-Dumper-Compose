@@ -48,11 +48,21 @@
     <string name="search">Search</string>
     <string name="search_no_results">No matching results</string>
     <string name="select_output_folder">Select an output folder for extracted images</string>
-    <string name="custom_user_agent_setting">Custom User-Agent Setting</string>
-    <string name="custom_user_agent">Custom User-Agent</string>
     <string name="clear">Clear</string>
+    <string name="output_folder">Output Folder</string>
+    <string name="change_output_folder">Change Output Folder</string>
+    <string name="delta_badge">Delta</string>
+    <string name="select_all">Select All</string>
+    <string name="clear_selection">Clear Selection</string>
+    <string name="dump_selected">Dump Selected (%1$d)</string>
+    <string name="delta_source_title">Old Partition Images</string>
+    <string name="delta_source_summary">This is a delta OTA. Import the matching old partition images (foo.img) before extracting.</string>
+    <string name="delta_source_import">Import old image</string>
+    <string name="delta_source_remove">Remove</string>
+    <string name="delta_source_missing">Missing old image for: %1$s</string>
+    <string name="file_already_exists_message">%1$s already exists in the output folder; rename or remove it and try again</string>
+    <string name="unsupported_operation">Unsupported operation for %1$s; this build supports REPLACE, REPLACE_BZ, REPLACE_XZ, REPLACE_ZSTD, ZERO, DISCARD and SOURCE_COPY</string>
     <string-array name="dropdownOptions">
-        <item>Custom User-Agent</item>
         <item>Custom File Save Folder</item>
         <item>About</item>
     </string-array>

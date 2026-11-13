@@ -2,8 +2,9 @@ package com.rcmiku.payload.dumper.compose
 
 import chromeos_update_engine.UpdateMetadata
 import com.rcmiku.payload.dumper.compose.utils.FileSeekableInput
+import com.rcmiku.payload.dumper.compose.utils.MissingSourceImageException
 import com.rcmiku.payload.dumper.compose.utils.PayloadUtil
-import com.rcmiku.payload.dumper.compose.utils.UnsupportedDeltaPayloadException
+import com.rcmiku.payload.dumper.compose.utils.UnsupportedPayloadOperationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -67,13 +68,14 @@ class PayloadUtilTest {
         }
 
     @Test
-    fun initPayload_rejectsDeltaPayloadBeforeAnyExtraction() {
+    fun initPayload_acceptsDeltaPayloadForLaterPerPartitionValidation() {
+        // Delta payloads are no longer rejected at parse time: only the partitions actually
+        // selected are validated (some partitions of a delta payload may be full REPLACE).
         val file = writeCrAU(manifest(1, emptyList()))
         withRaf(file) { source ->
-            val ex = assertThrows(UnsupportedDeltaPayloadException::class.java) {
-                runBlocking { PayloadUtil.initPayload("payload.bin", source, 0L) }
-            }
-            assertEquals(1, ex.minorVersion)
+            val payload = runBlocking { PayloadUtil.initPayload("payload.bin", source, 0L) }
+            assertTrue(payload.isDelta)
+            assertEquals(1, payload.minorVersion)
         }
     }
 
@@ -143,5 +145,70 @@ class PayloadUtilTest {
         assertEquals(20480L, info[0].rawSize)
         assertEquals("", info[0].sha256)
         assertEquals(20480L, info[0].size)
+        assertFalse(info[0].needsSourceImage)
+    }
+
+    @Test
+    fun getPartitionInfoList_marksDeltaPartitionsAsNeedingSourceImage() {
+        val delta = UpdateMetadata.PartitionUpdate.newBuilder()
+            .setPartitionName("system")
+            .addOperations(
+                UpdateMetadata.InstallOperation.newBuilder()
+                    .setType(UpdateMetadata.InstallOperation.Type.SOURCE_COPY)
+                    .addSrcExtents(UpdateMetadata.Extent.newBuilder().setStartBlock(0).setNumBlocks(1))
+                    .addDstExtents(UpdateMetadata.Extent.newBuilder().setStartBlock(0).setNumBlocks(1))
+            )
+            .build()
+        val full = UpdateMetadata.PartitionUpdate.newBuilder()
+            .setPartitionName("boot")
+            .addOperations(
+                UpdateMetadata.InstallOperation.newBuilder()
+                    .setType(UpdateMetadata.InstallOperation.Type.REPLACE)
+                    .addDstExtents(UpdateMetadata.Extent.newBuilder().setStartBlock(0).setNumBlocks(1))
+            )
+            .build()
+
+        val payload = withRaf(writeCrAU(manifest(2, listOf(delta, full)))) { source ->
+            runBlocking { PayloadUtil.initPayload("payload.bin", source, 0L) }
+        }
+
+        val info = PayloadUtil.getPartitionInfoList(payload).associateBy { it.partitionName }
+        assertTrue(info.getValue("system").needsSourceImage)
+        assertFalse(info.getValue("boot").needsSourceImage)
+    }
+
+    @Test
+    fun checkSupported_rejectsUnsupportedOperationBeforeWriting() {
+        val partition = UpdateMetadata.PartitionUpdate.newBuilder()
+            .setPartitionName("system")
+            .addOperations(
+                UpdateMetadata.InstallOperation.newBuilder()
+                    .setType(UpdateMetadata.InstallOperation.Type.PUFFDIFF)
+                    .addSrcExtents(UpdateMetadata.Extent.newBuilder().setStartBlock(0).setNumBlocks(1))
+                    .addDstExtents(UpdateMetadata.Extent.newBuilder().setStartBlock(0).setNumBlocks(1))
+            )
+            .build()
+        val ex = assertThrows(UnsupportedPayloadOperationException::class.java) {
+            PayloadUtil.checkSupported(partition, hasSourceImage = true)
+        }
+        assertEquals("system", ex.partitionName)
+    }
+
+    @Test
+    fun checkSupported_requiresSourceImageForSourceCopy() {
+        val partition = UpdateMetadata.PartitionUpdate.newBuilder()
+            .setPartitionName("system")
+            .addOperations(
+                UpdateMetadata.InstallOperation.newBuilder()
+                    .setType(UpdateMetadata.InstallOperation.Type.SOURCE_COPY)
+                    .addSrcExtents(UpdateMetadata.Extent.newBuilder().setStartBlock(0).setNumBlocks(1))
+                    .addDstExtents(UpdateMetadata.Extent.newBuilder().setStartBlock(0).setNumBlocks(1))
+            )
+            .build()
+        assertThrows(MissingSourceImageException::class.java) {
+            PayloadUtil.checkSupported(partition, hasSourceImage = false)
+        }
+        // With a source image it is supported.
+        PayloadUtil.checkSupported(partition, hasSourceImage = true)
     }
 }

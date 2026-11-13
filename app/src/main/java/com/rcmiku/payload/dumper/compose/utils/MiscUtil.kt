@@ -19,6 +19,10 @@ object MiscUtil {
         return joinToString("") { "%02x".format(it.toInt() and 0xFF) }
     }
 
+    fun ByteArray.toHexString(): String {
+        return joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+    }
+
     fun ByteArray.toLong(): Long {
         var result = 0L
         for (i in this.indices) {

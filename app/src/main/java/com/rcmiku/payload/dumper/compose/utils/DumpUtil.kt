@@ -1,6 +1,5 @@
 package com.rcmiku.payload.dumper.compose.utils
 
-import android.net.Uri
 import android.widget.Toast
 import com.rcmiku.payload.dumper.compose.R
 import com.rcmiku.payload.dumper.compose.model.Payload
@@ -11,15 +10,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.nio.file.FileAlreadyExistsException
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 
 /**
  * Orchestrates one partition dump: extract into a private working file, verify its SHA-256, then
  * publish it and clean up.
  *
  * Writing to a private working file means a cancelled or failed dump never leaves a partial .img
- * in the user's chosen destination.
+ * in Downloads.
  */
 class DumpUtil {
 
@@ -27,7 +24,6 @@ class DumpUtil {
         partitionName: String,
         payload: Payload,
         source: SeekableInput,
-        outputTreeUri: Uri?,
         oldPartition: SeekableInput? = null,
         onProgressUpdate: (Long) -> Unit,
         onVerification: (Boolean) -> Unit = {},
@@ -45,15 +41,10 @@ class DumpUtil {
                 return
             }
 
-        val destination = if (outputTreeUri == null) {
-            File(context.getExternalFilesDir(null) ?: context.filesDir, "$partitionName.img")
-        } else {
-            null
-        }
         var createdFile: File? = null
         val workingFile = try {
             withContext(Dispatchers.IO) {
-                File.createTempFile("dump-", ".part", destination?.parentFile ?: workingDir())
+                File.createTempFile("dump-", ".part", workingDir())
                     .also { createdFile = it }
             }
         } catch (error: CancellationException) {
@@ -127,8 +118,11 @@ class DumpUtil {
         }
         onVerification(true)
 
+        val imageName = "$partitionName.img"
         val published = runCatching {
-            publish(workingFile, partitionName, outputTreeUri, destination)
+            DownloadOutput.publish(
+                context, payload.deviceModels, payload.systemVersion, imageName, workingFile,
+            )
         }
         output.cleanup()
 
@@ -138,7 +132,7 @@ class DumpUtil {
                 throw error
             }
             val message = if (error is FileAlreadyExistsException) {
-                context.getString(R.string.file_already_exists_message, "$partitionName.img")
+                context.getString(R.string.file_already_exists_message, imageName)
             } else {
                 error.message
             }
@@ -149,28 +143,9 @@ class DumpUtil {
 
         Toast.makeText(
             context,
-            context.getString(R.string.dump_success_message, published.getOrThrow().toString()),
+            context.getString(R.string.dump_success_message, published.getOrThrow()),
             Toast.LENGTH_SHORT
         ).show()
-    }
-
-    private suspend fun publish(
-        workingFile: File,
-        partitionName: String,
-        treeUri: Uri?,
-        destination: File?,
-    ): Uri = withContext(Dispatchers.IO) {
-        if (treeUri != null) {
-            SafUtil.publishIntoTree(context, treeUri, "$partitionName.img", workingFile)
-        } else {
-            val dest = requireNotNull(destination)
-            // The verified working file is already on the destination filesystem.
-            Files.move(
-                workingFile.toPath(), dest.toPath(),
-                StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING,
-            )
-            Uri.fromFile(dest)
-        }
     }
 
     private fun workingDir(): File {

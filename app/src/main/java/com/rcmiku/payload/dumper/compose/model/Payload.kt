@@ -12,7 +12,8 @@ data class Payload(
     val isPath: Boolean,
     // Device codename(s) from the OTA package metadata; empty for a bare payload.bin or a package
     // whose metadata is missing/corrupt. Populated by ParseUtil after the payload is parsed.
-    val deviceModels: List<String> = emptyList()
+    val deviceModels: List<String> = emptyList(),
+    val systemVersion: String? = null,
 ) {
     /** Payload minor version. 0 means a full payload; anything else is incremental (delta). */
     val minorVersion: Int get() = deltaArchiveManifest.minorVersion

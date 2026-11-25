@@ -10,6 +10,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -23,8 +24,8 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -38,7 +39,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.res.stringArrayResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -53,10 +53,7 @@ import com.rcmiku.payload.dumper.compose.ui.component.SourceImageSection
 import com.rcmiku.payload.dumper.compose.utils.AppContextUtil
 import com.rcmiku.payload.dumper.compose.utils.MiscUtil.getItemShape
 import com.rcmiku.payload.dumper.compose.utils.MiscUtil.isValidUrl
-import com.rcmiku.payload.dumper.compose.utils.OutputTreeHolder
-import com.rcmiku.payload.dumper.compose.utils.ParseUtil
 import com.rcmiku.payload.dumper.compose.utils.PreferencesUtil
-import com.rcmiku.payload.dumper.compose.utils.SafUtil
 import com.rcmiku.payload.dumper.compose.viewModel.PayloadDumperViewModel
 import dev.chrisbanes.haze.ExperimentalHazeApi
 import dev.chrisbanes.haze.HazeEffectScope
@@ -121,7 +118,6 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
     val selectedPartitionInfo = remember { mutableStateOf<PartitionInfo?>(null) }
     val showDialog = remember { mutableStateOf(false) }
     val showAboutDialog = remember { mutableStateOf(false) }
-    val outputTreeUri by viewModel.outputTreeUri.collectAsState()
     val sourceImagePartitions by viewModel.sourceImagePartitions.collectAsState()
     val batchProgress by viewModel.batchProgress.collectAsState()
     // Partitions the user has checked for batch extraction. Kept in the composable (not the
@@ -132,7 +128,6 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
     var expanded by rememberSaveable { mutableStateOf(false) }
     val showTopPopup = rememberSaveable { mutableStateOf(false) }
     val isTopPopupExpanded = rememberSaveable { mutableStateOf(false) }
-    val dropdownOptions = stringArrayResource(R.array.dropdownOptions)
     val searchValue = viewModel.search.collectAsState()
     val isParsing by viewModel.isParsing.collectAsState()
 
@@ -167,23 +162,6 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
         }
     )
 
-    // Choose the destination folder for dumped images via SAF. Persist read/write access so it
-    // survives app restarts. The picker opens at the current folder, or the public Download root
-    // by default.
-    val folderPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocumentTree()
-    ) { uri ->
-        uri?.let {
-            val flags = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            runCatching {
-                AppContextUtil.context.contentResolver.takePersistableUriPermission(it, flags)
-            }
-            viewModel.setOutputTreeUri(it)
-            OutputTreeHolder.save(it)
-        }
-    }
-
     // Import an old partition image for delta extraction; remember which partition it is for.
     val sourceImageLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -198,18 +176,6 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                 )
             }
             viewModel.setSourceImage(partition, uri)
-        }
-    }
-
-    // First use (or a revoked/lost grant): guide the user to authorise the default Download folder.
-    LaunchedEffect(Unit) {
-        if (outputTreeUri == null) {
-            Toast.makeText(
-                AppContextUtil.context,
-                AppContextUtil.context.getString(R.string.select_output_folder),
-                Toast.LENGTH_LONG
-            ).show()
-            folderPickerLauncher.launch(SafUtil.downloadsTreeUri())
         }
     }
 
@@ -235,24 +201,17 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                             }
                         ) {
                             ListPopupColumn {
-                                dropdownOptions.forEachIndexed { index, text ->
-                                    DropdownImpl(
-                                        text = text,
-                                        optionSize = dropdownOptions.size,
-                                        isSelected = false,
-                                        onSelectedIndexChange = {
-                                            dismissPopup(showTopPopup)
-                                            isTopPopupExpanded.value = false
-                                            when (index) {
-                                                0 -> folderPickerLauncher.launch(
-                                                    outputTreeUri ?: SafUtil.downloadsTreeUri()
-                                                )
-                                                1 -> showAboutDialog.value = true
-                                            }
-                                        },
-                                        index = index
-                                    )
-                                }
+                                DropdownImpl(
+                                    text = stringResource(R.string.about_dialog_title),
+                                    optionSize = 1,
+                                    isSelected = false,
+                                    onSelectedIndexChange = {
+                                        dismissPopup(showTopPopup)
+                                        isTopPopupExpanded.value = false
+                                        showAboutDialog.value = true
+                                    },
+                                    index = 0,
+                                )
                             }
                         }
                         showTopPopup.value = true
@@ -362,6 +321,7 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                                             )
                                         }
                                     },
+                                    enabled = !isParsing,
                                     title = stringResource(R.string.from_local),
                                     onClick = {
                                         launcher.launch(arrayOf("application/zip", "application/octet-stream"))
@@ -380,6 +340,7 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                                             )
                                         }
                                     },
+                                    enabled = !isParsing,
                                     title = stringResource(R.string.from_url),
                                     onClick = {
                                         // Reveal the inline URL field in place; no dialog, no navigation.
@@ -409,6 +370,7 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                                             // scrolling out of view; the value is stored verbatim,
                                             // never split or rewritten.
                                             minLines = 2,
+                                            enabled = !isParsing,
                                             label = stringResource(R.string.ota_url)
                                         )
                                     } else {
@@ -427,54 +389,34 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .padding(bottom = 12.dp),
-                                        text = stringResource(R.string.parse),
+                                        text = stringResource(
+                                            if (isParsing) R.string.parsing_message else R.string.parse
+                                        ),
+                                        enabled = !isParsing,
                                         onClick = {
-                                            // Guard against duplicate taps launching overlapping
-                                            // parses, and against committing an empty/invalid link.
-                                            if (!isParsing) {
-                                                // In link mode validate the draft; a local pick is a
-                                                // content:// URI or path and only needs to be present.
-                                                val input = if (showUrlField) urlDraft else pathOrUrl.value
-                                                val valid = if (showUrlField) {
-                                                    input.isNotBlank() && input.isValidUrl()
-                                                } else {
-                                                    input.isNotBlank()
-                                                }
-                                                if (!valid) {
-                                                    Toast.makeText(
-                                                        AppContextUtil.context,
-                                                        AppContextUtil.context.getString(R.string.url_error_message),
-                                                        Toast.LENGTH_SHORT
-                                                    ).show()
-                                                } else {
-                                                    if (showUrlField) {
-                                                        // Commit the exact typed string (query
-                                                        // params and escapes preserved) so the
-                                                        // parser receives it unchanged.
+                                            if (viewModel.isParsing.value) return@TextButton
+                                            val parsingUrl = showUrlField
+                                            val input = if (parsingUrl) urlDraft else pathOrUrl.value
+                                            if (input.isBlank() || (parsingUrl && !input.isValidUrl())) {
+                                                Toast.makeText(
+                                                    AppContextUtil.context,
+                                                    AppContextUtil.context.getString(R.string.url_error_message),
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                                return@TextButton
+                                            }
+
+                                            focusManager.clearFocus()
+                                            keyboardController?.hide()
+                                            coroutineScope.launch {
+                                                viewModel.parsePayload(input) {
+                                                    if (parsingUrl) {
                                                         pathOrUrl.value = input
-                                                        PreferencesUtil().perfSet(
-                                                            "pathOrUrl",
-                                                            pathOrUrl.value
-                                                        )
+                                                        PreferencesUtil().perfSet("pathOrUrl", input)
                                                     }
-                                                    coroutineScope.launch {
-                                                        viewModel.setParsing(true)
-                                                        try {
-                                                            ParseUtil.loadPayload(
-                                                                pathOrUrl = input,
-                                                                onParsed = { payloadTemp ->
-                                                                    viewModel.initPayloadDumper(payload = payloadTemp)
-                                                                    // Parsed successfully: collapse the
-                                                                    // input section so results get space.
-                                                                    showInput = false
-                                                                    showUrlField = false
-                                                                    focusManager.clearFocus()
-                                                                    keyboardController?.hide()
-                                                                })
-                                                        } finally {
-                                                            viewModel.setParsing(false)
-                                                        }
-                                                    }
+                                                    selection = emptySet()
+                                                    showInput = false
+                                                    showUrlField = false
                                                 }
                                             }
                                         },
@@ -484,16 +426,11 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                             }
 
                             if (isParsing) {
-                                Column(modifier = Modifier.padding(top = 8.dp)) {
-                                    androidx.compose.material3.LinearProgressIndicator(
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                    Text(
-                                        modifier = Modifier.padding(top = 8.dp),
-                                        text = stringResource(R.string.parsing_message),
-                                        color = MiuixTheme.colorScheme.onSecondaryVariant
-                                    )
-                                }
+                                LinearProgressIndicator(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                    color = MiuixTheme.colorScheme.primary,
+                                    trackColor = MiuixTheme.colorScheme.secondaryVariant,
+                                )
                             }
                         } else {
                             // The input section is hidden after a successful parse; this entry
@@ -545,11 +482,15 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
             // Batch toolbar: select all / clear, and dump the checked partitions in one action.
             if (allPartitionInfoList.isNotEmpty()) {
                 item {
-                    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(bottom = 4.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             val allNames = allPartitionInfoList.map { it.partitionName }
@@ -570,6 +511,7 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                                 modifier = Modifier.weight(1f),
                                 text = stringResource(R.string.dump_selected, selection.size),
                                 enabled = selection.isNotEmpty(),
+                                colors = ButtonDefaults.textButtonColorsPrimary(),
                                 onClick = {
                                     selection.forEach { viewModel.startDump(it) }
                                 },
@@ -577,9 +519,9 @@ fun PayloadDumperApp(viewModel: PayloadDumperViewModel) {
                         }
                         // Overall progress across the partitions currently being extracted.
                         if (batchProgress > 0f && batchProgress < 1f) {
-                            androidx.compose.material3.LinearProgressIndicator(
+                            LinearProgressIndicator(
                                 progress = { batchProgress },
-                                modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                                modifier = Modifier.fillMaxWidth(),
                             )
                         }
                     }

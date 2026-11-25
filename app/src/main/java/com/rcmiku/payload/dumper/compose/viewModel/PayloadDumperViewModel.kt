@@ -13,6 +13,7 @@ import com.rcmiku.payload.dumper.compose.utils.HashUtil
 import com.rcmiku.payload.dumper.compose.utils.HttpUtil
 import com.rcmiku.payload.dumper.compose.utils.InputSourceHolder
 import com.rcmiku.payload.dumper.compose.utils.MissingSourceImageException
+import com.rcmiku.payload.dumper.compose.utils.ParseUtil
 import com.rcmiku.payload.dumper.compose.utils.PayloadUtil
 import com.rcmiku.payload.dumper.compose.utils.RangePlanner
 import com.rcmiku.payload.dumper.compose.utils.ResourceChangedException
@@ -61,29 +62,32 @@ class PayloadDumperViewModel(application: Application) : AndroidViewModel(applic
     private val _batchProgress = MutableStateFlow(0f)
     val batchProgress: StateFlow<Float> = _batchProgress
 
-    fun setParsing(parsing: Boolean) {
-        _isParsing.value = parsing
-    }
-
-    fun initPayloadDumper(payload: Payload) {
-        viewModelScope.launch {
-            // A new input replaces the previous result set; clear any stale search keyword so an
-            // old query can never hide the new partitions, and drop source images that belong to
-            // the previous payload.
-            _search.value = ""
-            sourceImages.closeAll()
-            sourceImages.clear()
-            _sourceImagePartitions.value = emptySet()
-            _payload.value = payload
-            _archiveInfo.value = ArchiveInfo(
-                payload.fileName,
-                payload.archiveSize,
-                payload.deltaArchiveManifest.securityPatchLevel,
-                payload.deviceModels
-            )
-            _partitionInfoList.value = PayloadUtil.getPartitionInfoList(payload)
-            _cachePartitionInfoList.value = _partitionInfoList.value
-            _batchProgress.value = 0f
+    suspend fun parsePayload(pathOrUrl: String, onParsed: () -> Unit) {
+        if (!_isParsing.compareAndSet(expect = false, update = true)) return
+        try {
+            ParseUtil.loadPayload(pathOrUrl) { payload ->
+                val partitions = withContext(Dispatchers.Default) {
+                    PayloadUtil.getPartitionInfoList(payload)
+                }
+                // The result and source images belong to the previous payload until parsing succeeds.
+                _search.value = ""
+                sourceImages.closeAll()
+                sourceImages.clear()
+                _sourceImagePartitions.value = emptySet()
+                _payload.value = payload
+                _archiveInfo.value = ArchiveInfo(
+                    payload.fileName,
+                    payload.archiveSize,
+                    payload.deltaArchiveManifest.securityPatchLevel,
+                    payload.deviceModels,
+                )
+                _partitionInfoList.value = partitions
+                _cachePartitionInfoList.value = partitions
+                _batchProgress.value = 0f
+                onParsed()
+            }
+        } finally {
+            _isParsing.value = false
         }
     }
 
@@ -113,17 +117,6 @@ class PayloadDumperViewModel(application: Application) : AndroidViewModel(applic
 
     fun updateSearch(partitionName: String) {
         _search.value = partitionName
-    }
-
-    // --- Output folder (SAF) ----------------------------------------------------------------
-
-    private val _outputTreeUri = MutableStateFlow<Uri?>(null)
-
-    /** The destination folder for dumped images, or null when no folder is authorised yet. */
-    val outputTreeUri: StateFlow<Uri?> = _outputTreeUri
-
-    fun setOutputTreeUri(uri: Uri?) {
-        _outputTreeUri.value = uri
     }
 
     // --- Old partition images (delta OTA) ---------------------------------------------------
@@ -237,7 +230,6 @@ class PayloadDumperViewModel(application: Application) : AndroidViewModel(applic
                 partitionName = partitionName,
                 payload = payload,
                 source = source,
-                outputTreeUri = _outputTreeUri.value,
                 oldPartition = oldInput,
                 onProgressUpdate = { produced ->
                     if (total > 0) {

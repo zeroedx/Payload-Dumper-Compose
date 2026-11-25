@@ -5,8 +5,10 @@ import com.rcmiku.payload.dumper.compose.utils.FileSeekableInput
 import com.rcmiku.payload.dumper.compose.utils.OtaMetadataParser
 import com.rcmiku.payload.dumper.compose.utils.PayloadUtil
 import com.rcmiku.payload.dumper.compose.utils.SeekableInput
+import com.rcmiku.payload.dumper.compose.utils.ZipFileUtil
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -111,8 +113,63 @@ class OtaMetadataParserTest {
 
         val (offset, directory) = PayloadUtil.locatePayload(source)
         assertEquals(41L, offset)
-        assertEquals(listOf("raven"), OtaMetadataParser.readDeviceModels(source, requireNotNull(directory)))
+        val info = OtaMetadataParser.readPackageInfo(source, requireNotNull(directory))
+        assertEquals(listOf("raven"), info.deviceModels)
+        assertEquals("1", info.systemVersion("ota.zip"))
         assertEquals(listOf(4, bytes.size, 30, 30), readSizes.dropLast(1))
+    }
+
+    @Test
+    fun usesTheTargetHyperOsVersionFromTextMetadata() {
+        val content = """
+            pre-device=byron
+            pre-build-incremental=OS4.0.4.0.XAFCNXM
+            post-build-incremental=OS4.0.5.0.XAFCNXM
+        """.trimIndent().toByteArray()
+
+        val info = readPackageInfo(Entry(OtaMetadataParser.METADATA_TXT, content, ZipEntry.DEFLATED))
+        assertEquals(listOf("byron"), info.deviceModels)
+        assertEquals("os4.0.5.0", info.systemVersion("byron-OS4.0.4.0.zip"))
+    }
+
+    @Test
+    fun fillsInTheBuildFromTheProtobufPostcondition() {
+        val content = OtaPackageMetadata.OtaMetadata.newBuilder()
+            .setPrecondition(OtaPackageMetadata.DeviceState.newBuilder().setBuildIncremental("OS4.0.4.0"))
+            .setPostcondition(OtaPackageMetadata.DeviceState.newBuilder().setBuildIncremental("OS4.0.5.0"))
+            .build()
+            .toByteArray()
+
+        val info = readPackageInfo(
+            Entry(OtaMetadataParser.METADATA_TXT, "pre-device=byron".toByteArray(), ZipEntry.DEFLATED),
+            Entry(OtaMetadataParser.METADATA_PB, content, ZipEntry.DEFLATED),
+        )
+        assertEquals(listOf("byron"), info.deviceModels)
+        assertEquals("os4.0.5.0", info.systemVersion("ota.zip"))
+    }
+
+    @Test
+    fun recognisesTheHyperOsTagInTheOtaFilename() {
+        val info = readPackageInfo(Entry(OtaMetadataParser.METADATA_TXT, text("byron"), ZipEntry.DEFLATED))
+
+        assertEquals(
+            "os4.0.5.0",
+            info.systemVersion("byron-ota_full-OS4.0.5.0.XAFCNXM-user-17.0-f216b9cab2.zip"),
+        )
+        assertEquals("1", info.systemVersion("byron-OS4.0.4.0-OS4.0.5.0.zip"))
+    }
+
+    @Test
+    fun doesNotUseTheSourceVersionWhenTheTargetIsMissing() {
+        val content = "pre-device=byron\npre-build-incremental=OS4.0.4.0".toByteArray()
+
+        val info = readPackageInfo(Entry(OtaMetadataParser.METADATA_TXT, content, ZipEntry.DEFLATED))
+        assertNull(info.systemVersion("ota.zip"))
+    }
+
+    private fun readPackageInfo(vararg entries: Entry): OtaMetadataParser.PackageInfo = runBlocking {
+        val source = ByteArraySeekableInput(zip(entries.toList()))
+        OtaMetadataParser.readPackageInfo(source, requireNotNull(ZipFileUtil.readCentralDirectory(source)))
     }
 
     // 1. android/metadata with a valid pre-device.

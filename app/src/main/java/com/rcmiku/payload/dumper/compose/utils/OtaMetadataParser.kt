@@ -3,8 +3,8 @@ package com.rcmiku.payload.dumper.compose.utils
 import android.util.Log
 import com.google.protobuf.InvalidProtocolBufferException
 import com.rcmiku.payload.dumper.compose.proto.OtaPackageMetadata
-import com.rcmiku.payload.dumper.compose.utils.ZipFileUtil.locateCentralDirectory
 import com.rcmiku.payload.dumper.compose.utils.ZipFileUtil.locateCentralDirectoryEntry
+import kotlinx.coroutines.CancellationException
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.nio.charset.StandardCharsets
@@ -49,9 +49,6 @@ object OtaMetadataParser {
     /** Devices named by a single `pre-device` value. */
     private const val DEVICE_SEPARATOR = '|'
 
-    /** Local file header signature (`PK\003\004`). */
-    private const val LOCSIG = 0x04034b50L
-
     /** Decompression limit for a metadata entry; the real entries are a few hundred bytes. */
     private const val MAX_METADATA_BYTES = 4 * 1024 * 1024
 
@@ -77,19 +74,28 @@ object OtaMetadataParser {
             runCatching {
                 input.seek(0)
                 input.readFully(magic)
-            }.onFailure { return emptyList() }
+            }.onFailure {
+                if (it is CancellationException) throw it
+                return emptyList()
+            }
             if (String(magic, StandardCharsets.US_ASCII) == "CrAU") return emptyList()
         }
 
-        val centralDirectory = runCatching { readCentralDirectory(input, fileLength) }
+        val centralDirectory = runCatching { ZipFileUtil.readCentralDirectory(input) }
             .getOrElse { e ->
+                if (e is CancellationException) throw e
                 logInfo("Could not read ZIP central directory: ${e.message}")
                 return emptyList()
             } ?: return emptyList()
 
+        return readDeviceModels(input, centralDirectory)
+    }
+
+    internal suspend fun readDeviceModels(input: SeekableInput, centralDirectory: ByteArray): List<String> {
         for (path in CANDIDATE_PATHS) {
             val devices = runCatching { readEntry(input, centralDirectory, path) }
                 .getOrElse { e ->
+                    if (e is CancellationException) throw e
                     logInfo("Metadata entry $path unreadable: ${e.message}")
                     emptyList()
                 }
@@ -98,48 +104,24 @@ object OtaMetadataParser {
         return emptyList()
     }
 
-    private class CentralDirectory(val offset: Long, val bytes: ByteArray)
-
-    /** Reads the ZIP central directory (or null when the ZIP layout is unusable). */
-    private suspend fun readCentralDirectory(
-        input: SeekableInput,
-        fileLength: Long,
-    ): CentralDirectory? {
-        // The EOCD (and its optional comment) sits at the very end; a 4096-byte tail is more than
-        // enough for any real package. Shrinking the window for a small file keeps this correct for
-        // any ZIP, not just multi-gigabyte ones.
-        val tailSize = minOf(4096L, fileLength).toInt()
-        if (tailSize < 22) return null
-        val tail = ByteArray(tailSize)
-        input.seek(fileLength - tailSize)
-        input.readFully(tail)
-        val info = locateCentralDirectory(tail, fileLength)
-        if (info.offset < 0 || info.size <= 0 || info.offset + info.size > fileLength) return null
-        val bytes = ByteArray(info.size.toInt())
-        input.seek(info.offset)
-        input.readFully(bytes)
-        return CentralDirectory(info.offset, bytes)
-    }
-
     /** Extracts the device list from one metadata entry, or an empty list if it has none. */
     private suspend fun readEntry(
         input: SeekableInput,
-        centralDirectory: CentralDirectory,
+        centralDirectory: ByteArray,
         path: String,
     ): List<String> {
         // The central directory is authoritative for the method and the compressed size: a
         // streaming writer leaves a zero size in the local header (data descriptor).
-        val entry = locateCentralDirectoryEntry(centralDirectory.bytes, path) ?: return emptyList()
+        val entry = locateCentralDirectoryEntry(centralDirectory, path) ?: return emptyList()
         val localHeaderOffset = entry.localHeaderOffset
         if (localHeaderOffset < 0) return emptyList()
 
         input.seek(localHeaderOffset)
         val header = ByteArray(30)
         input.readFully(header)
-        if (le32(header, 0) != LOCSIG) return emptyList()
-        val fileNameLength = le16(header, 26)
-        val extraFieldLength = le16(header, 28)
-        val dataStart = localHeaderOffset + 30 + fileNameLength + extraFieldLength
+        val relativeOffset = ZipFileUtil.locateLocalFileOffset(header)
+        if (relativeOffset < 0) return emptyList()
+        val dataStart = localHeaderOffset + relativeOffset
 
         val compressed = if (entry.compressedSize > 0) {
             if (entry.compressedSize > MAX_METADATA_BYTES) {
@@ -229,15 +211,6 @@ object OtaMetadataParser {
         }
         return out.toByteArray()
     }
-
-    private fun le16(bytes: ByteArray, offset: Int): Int =
-        (bytes[offset].toInt() and 0xFF) or ((bytes[offset + 1].toInt() and 0xFF) shl 8)
-
-    private fun le32(bytes: ByteArray, offset: Int): Long =
-        (bytes[offset].toLong() and 0xFF) or
-            ((bytes[offset + 1].toLong() and 0xFF) shl 8) or
-            ((bytes[offset + 2].toLong() and 0xFF) shl 16) or
-            ((bytes[offset + 3].toLong() and 0xFF) shl 24)
 
     private fun logInfo(message: String) {
         runCatching { Log.i(TAG, message) }

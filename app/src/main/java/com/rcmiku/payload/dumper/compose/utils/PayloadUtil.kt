@@ -5,9 +5,6 @@ import com.rcmiku.payload.dumper.compose.model.PartitionInfo
 import com.rcmiku.payload.dumper.compose.model.Payload
 import com.rcmiku.payload.dumper.compose.model.PayloadHeader
 import com.rcmiku.payload.dumper.compose.utils.MiscUtil.toHexString
-import com.rcmiku.payload.dumper.compose.utils.MiscUtil.toInt
-import com.rcmiku.payload.dumper.compose.utils.MiscUtil.toLong
-import com.rcmiku.payload.dumper.compose.utils.ZipFileUtil.locateCentralDirectory
 import com.rcmiku.payload.dumper.compose.utils.ZipFileUtil.locateLocalFileHeader
 import com.rcmiku.payload.dumper.compose.utils.ZipFileUtil.locateLocalFileOffset
 import io.airlift.compress.zstd.ZstdInputStream
@@ -23,12 +20,12 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.io.RandomAccessFile
-import java.nio.charset.StandardCharsets
+import java.nio.ByteBuffer
 import java.security.MessageDigest
 
 object PayloadUtil {
 
-    private const val MAGIC_VALUE = "CrAU"
+    private const val MAGIC_VALUE = 0x43724155 // CrAU
     private const val FORMAT_VERSION = 2L
 
     /** Sanity bound on the proto manifest size, to avoid allocating absurd buffers. */
@@ -47,37 +44,38 @@ object PayloadUtil {
         }
 
         source.seek(payloadOffset)
-        val magicBytes = ByteArray(4)
-        source.readFully(magicBytes)
-        if (String(magicBytes, StandardCharsets.UTF_8) != MAGIC_VALUE) {
+        val headerBytes = ByteArray(24)
+        source.readFully(headerBytes)
+        val header = ByteBuffer.wrap(headerBytes)
+        if (header.int != MAGIC_VALUE) {
             throw IOException("Invalid payload magic value (not a CrAU payload)")
         }
 
-        val fileFormatVersionBytes = ByteArray(8)
-        source.readFully(fileFormatVersionBytes)
-        val fileFormatVersion = fileFormatVersionBytes.toLong()
+        val fileFormatVersion = header.long
         if (fileFormatVersion != FORMAT_VERSION) {
             throw IOException("Unsupported payload file format version $fileFormatVersion")
         }
 
-        val manifestSizeBytes = ByteArray(8)
-        source.readFully(manifestSizeBytes)
-        val manifestSize = manifestSizeBytes.toLong()
+        val manifestSize = header.long
         if (manifestSize <= 0 || manifestSize > MAX_MANIFEST_SIZE) {
             throw IOException("Unreasonable manifest size: $manifestSize")
         }
 
-        val metadataSignatureSizeBytes = ByteArray(4)
-        source.readFully(metadataSignatureSizeBytes)
-        val metadataSignatureSize = metadataSignatureSizeBytes.toInt()
+        val metadataSignatureSize = header.int
+        val sourceLength = source.length()
+        val metadataEnd = source.position()
+        if (metadataSignatureSize < 0 ||
+            manifestSize + metadataSignatureSize > sourceLength - metadataEnd
+        ) {
+            throw IOException("Invalid payload metadata size")
+        }
 
         val manifest = ByteArray(manifestSize.toInt())
         source.readFully(manifest)
-        val metadataSignatureMessage = ByteArray(metadataSignatureSize)
-        source.readFully(metadataSignatureMessage)
-
         val deltaArchiveManifest = UpdateMetadata.DeltaArchiveManifest.parseFrom(manifest)
-        val dataOffset: Long = source.position()
+        // The signature is not consumed by the parser, but it still precedes the operation data.
+        val dataOffset = source.position() + metadataSignatureSize
+        source.seek(dataOffset)
         val payloadHeader = PayloadHeader(fileFormatVersion, manifestSize, metadataSignatureSize)
         val payload = Payload(
             fileName,
@@ -85,7 +83,7 @@ object PayloadUtil {
             deltaArchiveManifest,
             dataOffset,
             deltaArchiveManifest.blockSize,
-            source.length(),
+            sourceLength,
             source.isLocal
         )
 
@@ -168,7 +166,7 @@ object PayloadUtil {
     /**
      * Writes the operation payload across all of its destination extents. A single op may target
      * several non-contiguous extents (a gap in the image), so the data must be split per extent
-     * rather than streamed from the first extent onward. [input] is copied with each extent filled
+     * rather than streamed from the first extent onward. Each destination extent is filled
      * to its full `numBlocks * blockSize`; a short payload is zero-padded and an over-long one is
      * rejected so a malformed op can never spill into the next extent.
      */
@@ -176,11 +174,12 @@ object PayloadUtil {
         partOutput: RandomAccessFile,
         op: UpdateMetadata.InstallOperation,
         blockSize: Int,
+        zeros: ByteArray,
         writeBody: (OutputStream) -> Unit,
     ) {
         val writer = ExtentOutputStream(partOutput, op.dstExtentsList, blockSize)
         writeBody(writer)
-        writer.padRemainingWithZeros()
+        writer.padRemainingWithZeros(zeros)
     }
 
     private fun extractOperation(
@@ -190,52 +189,57 @@ object PayloadUtil {
         oldPartition: SeekableInput?,
         blockSize: Int,
         dataOffset: Long,
+        buffer: ByteArray,
+        zeros: ByteArray,
     ) {
         if (op.dstExtentsList.isEmpty()) return
         val blobOffset = dataOffset + op.dataOffset
 
         when (op.type) {
             UpdateMetadata.InstallOperation.Type.REPLACE -> {
-                val blob = RangeInputStream(source, blobOffset, op.dataLength)
-                writeAcrossExtents(partOutput, op, blockSize) { out ->
-                    copyStream(blob, out)
+                val blob = RangeInputStream(
+                    source, blobOffset, op.dataLength, hash = !op.dataSha256Hash.isEmpty,
+                )
+                writeAcrossExtents(partOutput, op, blockSize, zeros) { out ->
+                    copyStream(blob, out, buffer)
                 }
-                verifyBlobHash(op, blob)
+                verifyBlobHash(op, blob, buffer)
             }
 
             UpdateMetadata.InstallOperation.Type.REPLACE_BZ,
             UpdateMetadata.InstallOperation.Type.REPLACE_XZ,
             UpdateMetadata.InstallOperation.Type.REPLACE_ZSTD -> {
-                val blob = RangeInputStream(source, blobOffset, op.dataLength)
-                // BZip2 needs a mark/reset-capable stream; a BufferedInputStream provides it.
+                val blob = RangeInputStream(
+                    source, blobOffset, op.dataLength, hash = !op.dataSha256Hash.isEmpty,
+                )
                 val decompressed: InputStream = when (op.type) {
                     UpdateMetadata.InstallOperation.Type.REPLACE_BZ ->
                         BZip2CompressorInputStream(BufferedInputStream(blob))
 
                     UpdateMetadata.InstallOperation.Type.REPLACE_XZ ->
-                        XZCompressorInputStream(blob)
+                        XZCompressorInputStream(BufferedInputStream(blob))
 
                     else -> ZstdInputStream(blob)
                 }
                 decompressed.use { input ->
-                    writeAcrossExtents(partOutput, op, blockSize) { out ->
-                        copyStream(input, out)
+                    writeAcrossExtents(partOutput, op, blockSize, zeros) { out ->
+                        copyStream(input, out, buffer)
                     }
                 }
-                verifyBlobHash(op, blob)
+                verifyBlobHash(op, blob, buffer)
             }
 
             UpdateMetadata.InstallOperation.Type.ZERO,
             UpdateMetadata.InstallOperation.Type.DISCARD -> {
                 // A fresh working file is already zero-filled; materialising the extents with
                 // zeros keeps DISCARD deterministic instead of leaving undefined content.
-                writeAcrossExtents(partOutput, op, blockSize) { /* pads zeros */ }
+                writeAcrossExtents(partOutput, op, blockSize, zeros) { /* pads zeros */ }
             }
 
             UpdateMetadata.InstallOperation.Type.SOURCE_COPY -> {
                 val old = oldPartition
                     ?: throw MissingSourceImageException("?")
-                copySourceExtents(old, op, partOutput, blockSize)
+                copySourceExtents(old, op, partOutput, blockSize, buffer, zeros)
             }
 
             else -> throw UnsupportedPayloadOperationException("?", op.type)
@@ -248,18 +252,19 @@ object PayloadUtil {
         op: UpdateMetadata.InstallOperation,
         partOutput: RandomAccessFile,
         blockSize: Int,
+        buffer: ByteArray,
+        zeros: ByteArray,
     ) {
         val srcExtents = op.srcExtentsList
         if (srcExtents.isEmpty()) {
             throw IOException("SOURCE_COPY operation has no source extent")
         }
-        val buffer = ByteArray(STREAM_BUFFER_SIZE)
-        val digest = MessageDigest.getInstance("SHA-256")
+        val digest = if (op.srcSha256Hash.isEmpty) null else MessageDigest.getInstance("SHA-256")
         var srcIndex = 0
         var offsetInExtent = 0L
         var remaining = srcExtents.sumOf { it.numBlocks } * blockSize
 
-        writeAcrossExtents(partOutput, op, blockSize) { out ->
+        writeAcrossExtents(partOutput, op, blockSize, zeros) { out ->
             while (remaining > 0) {
                 if (srcIndex >= srcExtents.size) {
                     throw IOException("SOURCE_COPY read past its source extents")
@@ -273,21 +278,21 @@ object PayloadUtil {
                 }
                 val chunk = minOf(remaining, extentBytes - offsetInExtent, buffer.size.toLong()).toInt()
                 oldPartition.readAt(extent.startBlock * blockSize + offsetInExtent, buffer, 0, chunk)
-                digest.update(buffer, 0, chunk)
+                digest?.update(buffer, 0, chunk)
                 out.write(buffer, 0, chunk)
                 offsetInExtent += chunk
                 remaining -= chunk
             }
         }
 
-        verifySourceHash(op, digest.digest())
+        if (digest != null) verifySourceHash(op, digest.digest())
     }
 
-    private fun verifyBlobHash(op: UpdateMetadata.InstallOperation, blob: RangeInputStream) {
+    private fun verifyBlobHash(op: UpdateMetadata.InstallOperation, blob: RangeInputStream, buffer: ByteArray) {
         if (!op.hasDataSha256Hash()) return
         val expected = op.dataSha256Hash.toByteArray()
         if (expected.isEmpty()) return
-        val actual = blob.drainAndDigest()
+        val actual = blob.drainAndDigest(buffer)
         if (!expected.contentEquals(actual)) {
             throw IOException(
                 "Operation blob SHA-256 mismatch (expected ${expected.toHexString()}, " +
@@ -308,8 +313,7 @@ object PayloadUtil {
         }
     }
 
-    private fun copyStream(input: InputStream, out: OutputStream) {
-        val buffer = ByteArray(STREAM_BUFFER_SIZE)
+    private fun copyStream(input: InputStream, out: OutputStream, buffer: ByteArray) {
         while (true) {
             val read = input.read(buffer)
             if (read < 0) break
@@ -329,9 +333,6 @@ object PayloadUtil {
             // Fail before writing anything if the manifest asks for an operation we cannot apply.
             checkSupported(metadataPartition, oldPartition != null)
 
-            // Approximate expected output size, used to make the progress bar monotonic.
-            val totalBytes = metadataPartition.operationsList
-                .sumOf { it.dstExtentsList.sumOf { e -> e.numBlocks } } * payload.blockSize
             var produced = 0L
 
             val declaredSize = if (metadataPartition.hasNewPartitionInfo()) {
@@ -342,6 +343,8 @@ object PayloadUtil {
 
             try {
                 RandomAccessFile(output.file, "rw").use { partOutput ->
+                    val buffer = ByteArray(STREAM_BUFFER_SIZE)
+                    val zeros = ByteArray(STREAM_BUFFER_SIZE)
                     metadataPartition.operationsList.forEach { operation ->
                         // Cooperative cancellation: the loop body does blocking file/network IO,
                         // so nothing else would interrupt it promptly.
@@ -353,6 +356,8 @@ object PayloadUtil {
                             oldPartition,
                             payload.blockSize,
                             payload.dataOffset,
+                            buffer,
+                            zeros,
                         )
                         produced += operation.dstExtentsList.sumOf { e -> e.numBlocks } *
                             payload.blockSize
@@ -373,12 +378,12 @@ object PayloadUtil {
             }
 
             // If we know the expected size and the output is short, treat it as a failure.
-            if (totalBytes > 0 && output.file.length() < totalBytes && declaredSize == 0L) {
+            if (declaredSize == 0L && produced > 0 && output.file.length() < produced) {
                 val actual = output.file.length()
                 output.cleanup()
                 throw IOException(
                     "Incomplete extraction: ${metadataPartition.partitionName}.img is $actual " +
-                        "bytes, expected $totalBytes"
+                        "bytes, expected $produced"
                 )
             }
 
@@ -401,40 +406,36 @@ object PayloadUtil {
      * Locates the absolute byte offset of `payload.bin` inside an OTA ZIP, or 0 for a bare
      * `payload.bin`. Works from any [SeekableInput].
      */
-    suspend fun getPayloadOffset(input: SeekableInput, fileName: String = "payload.bin"): Long {
-        // A bare payload.bin (file or URL) starts at offset 0.
-        if (fileName == "payload.bin" && input.length() >= 4) {
+    suspend fun getPayloadOffset(input: SeekableInput, fileName: String = "payload.bin"): Long =
+        locatePayload(input, fileName).offset
+
+    internal data class PayloadLocation(val offset: Long, val centralDirectory: ByteArray?)
+
+    internal suspend fun locatePayload(
+        input: SeekableInput,
+        fileName: String = "payload.bin",
+    ): PayloadLocation {
+        val fileLength = input.length()
+        if (fileName == "payload.bin" && fileLength >= 4) {
             val magic = ByteArray(4)
             input.seek(0)
             input.readFully(magic)
-            if (String(magic, StandardCharsets.UTF_8) == MAGIC_VALUE) return 0L
+            if (ByteBuffer.wrap(magic).int == MAGIC_VALUE) return PayloadLocation(0, null)
         }
 
-        val fileLength = input.length()
-        if (fileLength < 4096) throw IOException("File too small to be an OTA package")
-
-        val endBytes = ByteArray(4096)
-        input.seek(fileLength - 4096)
-        input.readFully(endBytes)
-
-        val centralDirectoryInfo = locateCentralDirectory(endBytes, fileLength)
-        if (centralDirectoryInfo.offset < 0 || centralDirectoryInfo.size <= 0) {
-            throw IOException("Could not locate ZIP central directory")
-        }
-
-        input.seek(centralDirectoryInfo.offset)
-        val centralDirectory = ByteArray(centralDirectoryInfo.size.toInt())
-        input.readFully(centralDirectory)
-
-        val localHeaderOffset = locateLocalFileHeader(centralDirectory, fileName)
+        val directory = ZipFileUtil.readCentralDirectory(input)
+            ?: throw IOException("Could not locate ZIP central directory")
+        val localHeaderOffset = locateLocalFileHeader(directory, fileName)
         if (localHeaderOffset < 0) {
             throw IOException("$fileName not found inside the OTA package")
         }
 
-        val localHeaderBytes = ByteArray(256)
+        val localHeader = ByteArray(30)
         input.seek(localHeaderOffset)
-        input.readFully(localHeaderBytes)
-        return locateLocalFileOffset(localHeaderBytes) + localHeaderOffset
+        input.readFully(localHeader)
+        val relativeOffset = locateLocalFileOffset(localHeader)
+        if (relativeOffset < 0) throw IOException("Invalid ZIP local file header")
+        return PayloadLocation(localHeaderOffset + relativeOffset, directory)
     }
 }
 
@@ -493,7 +494,6 @@ private class ExtentOutputStream(
     private var extentIndex = 0
     private var bytesInExtent = 0L
     private var totalWritten = 0L
-    private val capacity = extents.sumOf { it.numBlocks } * blockSize
 
     init {
         require(extents.isNotEmpty()) { "operation has no destination extent" }
@@ -512,6 +512,7 @@ private class ExtentOutputStream(
         var n = len
         while (n > 0) {
             if (extentIndex >= extents.size) {
+                val capacity = extents.sumOf { it.numBlocks } * blockSize
                 throw IOException(
                     "Operation writes past its destination extents ($totalWritten + $n > $capacity bytes)"
                 )
@@ -546,8 +547,7 @@ private class ExtentOutputStream(
      * destination extents are fully materialised. Later extents are sought individually, so a gap
      * between extents is never written.
      */
-    fun padRemainingWithZeros() {
-        val pad = ByteArray(1 shl 16)
+    fun padRemainingWithZeros(pad: ByteArray) {
         while (extentIndex < extents.size) {
             var remaining = extentCapacity(extentIndex) - bytesInExtent
             while (remaining > 0) {

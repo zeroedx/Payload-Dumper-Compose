@@ -11,10 +11,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.nio.file.FileAlreadyExistsException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 /**
  * Orchestrates one partition dump: extract into a private working file, verify its SHA-256, then
- * publish it (copy to the destination) and clean up.
+ * publish it and clean up.
  *
  * Writing to a private working file means a cancelled or failed dump never leaves a partial .img
  * in the user's chosen destination.
@@ -43,7 +45,26 @@ class DumpUtil {
                 return
             }
 
-        val workingFile = File(workingDir(), "$partitionName.img")
+        val destination = if (outputTreeUri == null) {
+            File(context.getExternalFilesDir(null) ?: context.filesDir, "$partitionName.img")
+        } else {
+            null
+        }
+        var createdFile: File? = null
+        val workingFile = try {
+            withContext(Dispatchers.IO) {
+                File.createTempFile("dump-", ".part", destination?.parentFile ?: workingDir())
+                    .also { createdFile = it }
+            }
+        } catch (error: CancellationException) {
+            createdFile?.delete()
+            onCancelled()
+            throw error
+        } catch (error: Exception) {
+            Toast.makeText(context, error.message, Toast.LENGTH_SHORT).show()
+            onFailure(false)
+            return
+        }
         val output = PartitionOutput(workingFile)
 
         val result = runCatching {
@@ -60,7 +81,6 @@ class DumpUtil {
         result.onFailure { error ->
             output.cleanup()
             if (error is CancellationException) {
-                output.cleanup()
                 onCancelled()
                 throw error
             }
@@ -81,10 +101,19 @@ class DumpUtil {
         } else {
             ""
         }
-        val verified = if (expected.isBlank()) {
-            true
-        } else {
-            withContext(Dispatchers.IO) { HashUtil.matches(expected, HashUtil.sha256Hex(workingFile)) }
+        val verified = try {
+            expected.isBlank() || withContext(Dispatchers.IO) {
+                HashUtil.matches(expected, HashUtil.sha256Hex(workingFile))
+            }
+        } catch (error: Exception) {
+            output.cleanup()
+            if (error is CancellationException) {
+                onCancelled()
+                throw error
+            }
+            Toast.makeText(context, error.message, Toast.LENGTH_SHORT).show()
+            onFailure(false)
+            return
         }
 
         if (!verified) {
@@ -99,11 +128,15 @@ class DumpUtil {
         onVerification(true)
 
         val published = runCatching {
-            publish(workingFile, partitionName, outputTreeUri)
+            publish(workingFile, partitionName, outputTreeUri, destination)
         }
         output.cleanup()
 
         published.onFailure { error ->
+            if (error is CancellationException) {
+                onCancelled()
+                throw error
+            }
             val message = if (error is FileAlreadyExistsException) {
                 context.getString(R.string.file_already_exists_message, "$partitionName.img")
             } else {
@@ -121,27 +154,21 @@ class DumpUtil {
         ).show()
     }
 
-    private suspend fun publish(workingFile: File, partitionName: String, treeUri: Uri?): Uri = withContext(Dispatchers.IO) {
+    private suspend fun publish(
+        workingFile: File,
+        partitionName: String,
+        treeUri: Uri?,
+        destination: File?,
+    ): Uri = withContext(Dispatchers.IO) {
         if (treeUri != null) {
             SafUtil.publishIntoTree(context, treeUri, "$partitionName.img", workingFile)
         } else {
-            // No SAF destination chosen yet: fall back to the app-private files dir so the dump
-            // always succeeds and can be exported later. Copy to a temporary sibling and rename,
-            // so a copy interrupted midway never leaves a truncated .img at the final path.
-            val dest = File(context.getExternalFilesDir(null) ?: context.filesDir, "$partitionName.img")
-            val temp = File(dest.parentFile, "${dest.name}.part")
-            try {
-                SafUtil.writeToFile(workingFile, temp)
-                if (dest.exists()) dest.delete()
-                if (!temp.renameTo(dest)) {
-                    // Fall back to a direct copy if rename is not permitted on this volume.
-                    SafUtil.writeToFile(temp, dest)
-                    temp.delete()
-                }
-            } catch (t: Throwable) {
-                temp.delete()
-                throw t
-            }
+            val dest = requireNotNull(destination)
+            // The verified working file is already on the destination filesystem.
+            Files.move(
+                workingFile.toPath(), dest.toPath(),
+                StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING,
+            )
             Uri.fromFile(dest)
         }
     }

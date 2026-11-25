@@ -3,6 +3,7 @@ package com.rcmiku.payload.dumper.compose
 import chromeos_update_engine.UpdateMetadata
 import com.rcmiku.payload.dumper.compose.utils.FileSeekableInput
 import com.rcmiku.payload.dumper.compose.utils.MissingSourceImageException
+import com.rcmiku.payload.dumper.compose.utils.SeekableInput
 import com.rcmiku.payload.dumper.compose.utils.PayloadUtil
 import com.rcmiku.payload.dumper.compose.utils.UnsupportedPayloadOperationException
 import kotlinx.coroutines.runBlocking
@@ -88,6 +89,27 @@ class PayloadUtilTest {
             assertEquals(0, payload.minorVersion)
             assertEquals(4096, payload.blockSize)
             assertTrue(payload.isPath)
+        }
+    }
+
+    @Test
+    fun initPayload_readsHeaderTogetherAndSkipsMetadataSignature() = runBlocking {
+        val manifest = manifest(0, emptyList())
+        val file = writeCrAU(manifest, ByteArray(512))
+        RandomAccessFile(file, "r").use { raf ->
+            val input = FileSeekableInput(raf)
+            val readSizes = mutableListOf<Int>()
+            val source = object : SeekableInput by input {
+                override suspend fun readFully(buffer: ByteArray) {
+                    readSizes.add(buffer.size)
+                    input.readFully(buffer)
+                }
+            }
+
+            val payload = PayloadUtil.initPayload("payload.bin", source, 0)
+            assertEquals(listOf(24, manifest.serializedSize), readSizes)
+            assertEquals(file.length(), payload.dataOffset)
+            assertEquals(payload.dataOffset, source.position())
         }
     }
 

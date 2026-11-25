@@ -3,6 +3,7 @@ package com.rcmiku.payload.dumper.compose
 import com.rcmiku.payload.dumper.compose.proto.OtaPackageMetadata
 import com.rcmiku.payload.dumper.compose.utils.FileSeekableInput
 import com.rcmiku.payload.dumper.compose.utils.OtaMetadataParser
+import com.rcmiku.payload.dumper.compose.utils.PayloadUtil
 import com.rcmiku.payload.dumper.compose.utils.SeekableInput
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -90,6 +91,29 @@ class OtaMetadataParserTest {
             )
             .build()
             .toByteArray()
+
+    @Test
+    fun payloadAndDeviceMetadataReuseTheDirectoryInTheZipTail() = runBlocking {
+        val bytes = zip(
+            listOf(
+                Entry("payload.bin", "CrAU".toByteArray(), ZipEntry.STORED),
+                Entry(OtaMetadataParser.METADATA_TXT, text("raven"), ZipEntry.DEFLATED),
+            )
+        )
+        val input = ByteArraySeekableInput(bytes)
+        val readSizes = mutableListOf<Int>()
+        val source = object : SeekableInput by input {
+            override suspend fun readFully(buffer: ByteArray) {
+                readSizes.add(buffer.size)
+                input.readFully(buffer)
+            }
+        }
+
+        val (offset, directory) = PayloadUtil.locatePayload(source)
+        assertEquals(41L, offset)
+        assertEquals(listOf("raven"), OtaMetadataParser.readDeviceModels(source, requireNotNull(directory)))
+        assertEquals(listOf(4, bytes.size, 30, 30), readSizes.dropLast(1))
+    }
 
     // 1. android/metadata with a valid pre-device.
     @Test

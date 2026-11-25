@@ -15,9 +15,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
@@ -28,6 +29,7 @@ import com.rcmiku.payload.dumper.compose.R
 import com.rcmiku.payload.dumper.compose.model.PartitionInfo
 import com.rcmiku.payload.dumper.compose.model.VerifyState
 import com.rcmiku.payload.dumper.compose.utils.MiscUtil.sizeIn
+import top.yukonga.miuix.kmp.basic.Checkbox
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
@@ -40,6 +42,7 @@ fun PartitionInfoItem(
     onDownload: () -> Unit,
     onCancel: () -> Unit = {},
 ) {
+    val onSelectionChanged by rememberUpdatedState(onSelectedChange)
 
     Row(
         modifier = Modifier
@@ -52,7 +55,8 @@ fun PartitionInfoItem(
         // dialog, so the two gestures do not collide.
         Checkbox(
             checked = selected,
-            onCheckedChange = onSelectedChange,
+            onCheckedChange = { onSelectionChanged(it) },
+            modifier = Modifier.size(48.dp),
         )
         Image(
             modifier = Modifier

@@ -6,6 +6,7 @@ import com.rcmiku.payload.dumper.compose.R
 import com.rcmiku.payload.dumper.compose.model.Payload
 import com.rcmiku.payload.dumper.compose.utils.MiscUtil.isReadable
 import com.rcmiku.payload.dumper.compose.utils.MiscUtil.isValidUrl
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -21,50 +22,53 @@ object ParseUtil {
 
     suspend fun loadPayload(pathOrUrl: String, onParsed: suspend (Payload) -> Unit) {
         withContext(Dispatchers.IO) {
-            val source: SeekableInput
-            val fileName: String
-            when {
-                pathOrUrl.isValidUrl() -> {
-                    HttpUtil.init(pathOrUrl)
-                    source = HttpUtil
-                    fileName = HttpUtil.name
-                }
-
-                pathOrUrl.startsWith("content://") -> {
-                    val uri = Uri.parse(pathOrUrl)
-                    val input = UriSeekableInput(AppContextUtil.context, uri)
-                    source = input
-                    fileName = SafUtil.queryDisplayName(AppContextUtil.context, uri)
-                        ?: "payload.bin"
-                }
-
-                pathOrUrl.isReadable() -> {
-                    // Read-only: we only ever read from the OTA package here.
-                    val file = File(pathOrUrl)
-                    source = FileSeekableInput(RandomAccessFile(file, "r"))
-                    fileName = file.name
-                }
-
-                else -> throw IllegalArgumentException("Unsupported path or URL: $pathOrUrl")
-            }
-
+            var openedSource: SeekableInput? = null
             try {
-                val payloadOffset = PayloadUtil.getPayloadOffset(source)
+                val (source, fileName) = when {
+                    pathOrUrl.isValidUrl() -> {
+                        openedSource = HttpUtil
+                        HttpUtil.init(pathOrUrl)
+                        HttpUtil to HttpUtil.name
+                    }
+
+                    pathOrUrl.startsWith("content://") -> {
+                        val uri = Uri.parse(pathOrUrl)
+                        val input = UriSeekableInput(AppContextUtil.context, uri)
+                        openedSource = input
+                        val name = SafUtil.queryDisplayName(AppContextUtil.context, uri) ?: "payload.bin"
+                        input to name
+                    }
+
+                    pathOrUrl.isReadable() -> {
+                        val file = File(pathOrUrl)
+                        val input = FileSeekableInput(RandomAccessFile(file, "r"))
+                        openedSource = input
+                        input to file.name
+                    }
+
+                    else -> throw IllegalArgumentException("Unsupported path or URL: $pathOrUrl")
+                }
+
+                val (payloadOffset, directory) = PayloadUtil.locatePayload(source)
                 // Best-effort: a missing/corrupt metadata entry must never fail a valid parse.
-                val deviceModels = runCatching { OtaMetadataParser.readDeviceModels(source) }
-                    .getOrDefault(emptyList())
-                val payload = PayloadUtil.initPayload(fileName, source, payloadOffset)
-                    .copy(deviceModels = deviceModels)
+                val packageInfo = directory?.let { OtaMetadataParser.readPackageInfo(source, it) }
+                val payload = PayloadUtil.initPayload(fileName, source, payloadOffset).copy(
+                    deviceModels = packageInfo?.deviceModels.orEmpty(),
+                    systemVersion = packageInfo?.systemVersion(fileName),
+                )
                 InputSourceHolder.set(source)
                 withContext(Dispatchers.Main) {
                     onParsed(payload)
                     toast(AppContextUtil.context, AppContextUtil.context.getString(R.string.parse_success_message))
                 }
-            } catch (t: Throwable) {
-                if (InputSourceHolder.current === source) InputSourceHolder.clear()
-                source.close()
-                // Never swallow cancellation: propagating it keeps structured concurrency intact.
-                if (t is kotlinx.coroutines.CancellationException) throw t
+            } catch (t: Exception) {
+                val source = openedSource
+                if (source != null && InputSourceHolder.current === source) {
+                    InputSourceHolder.clear()
+                } else {
+                    source?.close()
+                }
+                if (t is CancellationException) throw t
                 val appContext = AppContextUtil.context
                 withContext(Dispatchers.Main) {
                     toast(appContext, t.message ?: appContext.getString(R.string.url_error_message))

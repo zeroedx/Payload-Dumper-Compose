@@ -3,8 +3,8 @@ package com.rcmiku.payload.dumper.compose.utils
 import android.util.Log
 import com.google.protobuf.InvalidProtocolBufferException
 import com.rcmiku.payload.dumper.compose.proto.OtaPackageMetadata
-import com.rcmiku.payload.dumper.compose.utils.ZipFileUtil.locateCentralDirectory
 import com.rcmiku.payload.dumper.compose.utils.ZipFileUtil.locateCentralDirectoryEntry
+import kotlinx.coroutines.CancellationException
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.nio.charset.StandardCharsets
@@ -12,18 +12,9 @@ import java.util.zip.Inflater
 import java.util.zip.InflaterInputStream
 
 /**
- * Reads the target device codename(s) from an OTA ZIP's package metadata.
- *
- * Only the ZIP central directory and the (tiny) metadata entries are touched, so an OTA package of
- * any size is handled without downloading or unpacking it as a whole. A bare `payload.bin` (no ZIP
- * wrapper) simply has no metadata and yields an empty list.
- *
- * The metadata can appear as plain text (`META-INF/com/android/metadata`, `android/metadata`) with a
- * `pre-device=<value>` line, or as protobuf (`META-INF/com/android/metadata.pb`) where the value is
- * `precondition.device` (repeated). A value containing `|` is split into the individual devices the
- * package targets. Anything that is missing, malformed, unreadable or oversized is treated as "no
- * device": the caller must never fail the payload parse because of metadata, and a device is never
- * guessed from the file name, URL or build fingerprint.
+ * Reads target device and build information from an OTA ZIP's package metadata.
+ * Only the ZIP directory and the small metadata entries are read. Metadata errors
+ * are best-effort and must not prevent parsing a valid payload.
  */
 object OtaMetadataParser {
 
@@ -38,19 +29,29 @@ object OtaMetadataParser {
     /** Alternative text path used by some OTA variants. */
     const val METADATA_ANDROID = "android/metadata"
 
-    /**
-     * Candidate entries, most authoritative first. The text metadata is preferred because its
-     * `pre-device` is exactly the value this feature targets; the protobuf is the primary format
-     * for newer packages and is used when the text entry is absent. Kept in one ordered list so the
-     * resolution order is explicit and testable.
-     */
     val CANDIDATE_PATHS = listOf(METADATA_TXT, METADATA_PB, METADATA_ANDROID)
+
+    private val buildIdentifier = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+    private val vendorVersion = Regex(
+        """(?<![A-Za-z0-9])(?:OS|V)[0-9]{1,3}(?:\.[0-9]{1,3}){3}(?![A-Za-z0-9]|\.[0-9])""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    internal data class PackageInfo(
+        val deviceModels: List<String> = emptyList(),
+        val targetBuild: String? = null,
+    ) {
+        /** Prefer the OTA's target version, then a single explicit HyperOS or MIUI filename tag. */
+        fun systemVersion(fileName: String): String? {
+            val metadataVersion = targetBuild?.let { vendorVersion.find(it)?.value }
+            return metadataVersion?.lowercase()
+                ?: vendorVersion.findAll(fileName).map { it.value.lowercase() }.distinct().singleOrNull()
+                ?: targetBuild
+        }
+    }
 
     /** Devices named by a single `pre-device` value. */
     private const val DEVICE_SEPARATOR = '|'
-
-    /** Local file header signature (`PK\003\004`). */
-    private const val LOCSIG = 0x04034b50L
 
     /** Decompression limit for a metadata entry; the real entries are a few hundred bytes. */
     private const val MAX_METADATA_BYTES = 4 * 1024 * 1024
@@ -61,12 +62,7 @@ object OtaMetadataParser {
      */
     private const val INFLATE_CHUNK = 8 * 1024
 
-    /**
-     * Returns the device codename(s) the OTA targets, or an empty list when the metadata is absent,
-     * has no `pre-device`, is malformed, unreadable or unsupported. Never throws for a metadata
-     * problem; unexpected I/O errors from the ZIP directory are also swallowed so the caller's
-     * payload parse is unaffected.
-     */
+    /** Returns only the device codenames for callers that do not need the target build. */
     suspend fun readDeviceModels(input: SeekableInput): List<String> {
         val fileLength = input.length()
         if (fileLength < 22) return emptyList()
@@ -77,69 +73,57 @@ object OtaMetadataParser {
             runCatching {
                 input.seek(0)
                 input.readFully(magic)
-            }.onFailure { return emptyList() }
+            }.onFailure {
+                if (it is CancellationException) throw it
+                return emptyList()
+            }
             if (String(magic, StandardCharsets.US_ASCII) == "CrAU") return emptyList()
         }
 
-        val centralDirectory = runCatching { readCentralDirectory(input, fileLength) }
+        val centralDirectory = runCatching { ZipFileUtil.readCentralDirectory(input) }
             .getOrElse { e ->
+                if (e is CancellationException) throw e
                 logInfo("Could not read ZIP central directory: ${e.message}")
                 return emptyList()
             } ?: return emptyList()
 
+        return readPackageInfo(input, centralDirectory).deviceModels
+    }
+
+    internal suspend fun readPackageInfo(input: SeekableInput, centralDirectory: ByteArray): PackageInfo {
+        var devices = emptyList<String>()
+        var targetBuild: String? = null
         for (path in CANDIDATE_PATHS) {
-            val devices = runCatching { readEntry(input, centralDirectory, path) }
+            val entry = runCatching { readEntry(input, centralDirectory, path) }
                 .getOrElse { e ->
+                    if (e is CancellationException) throw e
                     logInfo("Metadata entry $path unreadable: ${e.message}")
-                    emptyList()
-                }
-            if (devices.isNotEmpty()) return devices
+                    null
+                } ?: continue
+            if (devices.isEmpty()) devices = entry.deviceModels
+            if (targetBuild == null) targetBuild = entry.targetBuild
+            if (devices.isNotEmpty() && targetBuild != null) break
         }
-        return emptyList()
+        return PackageInfo(devices, targetBuild)
     }
 
-    private class CentralDirectory(val offset: Long, val bytes: ByteArray)
-
-    /** Reads the ZIP central directory (or null when the ZIP layout is unusable). */
-    private suspend fun readCentralDirectory(
-        input: SeekableInput,
-        fileLength: Long,
-    ): CentralDirectory? {
-        // The EOCD (and its optional comment) sits at the very end; a 4096-byte tail is more than
-        // enough for any real package. Shrinking the window for a small file keeps this correct for
-        // any ZIP, not just multi-gigabyte ones.
-        val tailSize = minOf(4096L, fileLength).toInt()
-        if (tailSize < 22) return null
-        val tail = ByteArray(tailSize)
-        input.seek(fileLength - tailSize)
-        input.readFully(tail)
-        val info = locateCentralDirectory(tail, fileLength)
-        if (info.offset < 0 || info.size <= 0 || info.offset + info.size > fileLength) return null
-        val bytes = ByteArray(info.size.toInt())
-        input.seek(info.offset)
-        input.readFully(bytes)
-        return CentralDirectory(info.offset, bytes)
-    }
-
-    /** Extracts the device list from one metadata entry, or an empty list if it has none. */
     private suspend fun readEntry(
         input: SeekableInput,
-        centralDirectory: CentralDirectory,
+        centralDirectory: ByteArray,
         path: String,
-    ): List<String> {
+    ): PackageInfo? {
         // The central directory is authoritative for the method and the compressed size: a
         // streaming writer leaves a zero size in the local header (data descriptor).
-        val entry = locateCentralDirectoryEntry(centralDirectory.bytes, path) ?: return emptyList()
+        val entry = locateCentralDirectoryEntry(centralDirectory, path) ?: return null
         val localHeaderOffset = entry.localHeaderOffset
-        if (localHeaderOffset < 0) return emptyList()
+        if (localHeaderOffset < 0) return null
 
         input.seek(localHeaderOffset)
         val header = ByteArray(30)
         input.readFully(header)
-        if (le32(header, 0) != LOCSIG) return emptyList()
-        val fileNameLength = le16(header, 26)
-        val extraFieldLength = le16(header, 28)
-        val dataStart = localHeaderOffset + 30 + fileNameLength + extraFieldLength
+        val relativeOffset = ZipFileUtil.locateLocalFileOffset(header)
+        if (relativeOffset < 0) return null
+        val dataStart = localHeaderOffset + relativeOffset
 
         val compressed = if (entry.compressedSize > 0) {
             if (entry.compressedSize > MAX_METADATA_BYTES) {
@@ -158,48 +142,48 @@ object OtaMetadataParser {
             8 -> inflate(compressed)
             else -> throw IOException("Unsupported compression method ${entry.method}")
         }
-        return extractDevices(content, path.endsWith(".pb"))
+        if (content.isEmpty()) return null
+        return if (path.endsWith(".pb")) parseProtobuf(content) else parseText(content)
     }
 
-    /**
-     * Decodes [content] and pulls the device list out of it. `.pb` entries are decoded as protobuf;
-     * anything else as text. The entry name decides which, because the two formats share neither a
-     * magic nor a reliable structure.
-     */
-    private fun extractDevices(content: ByteArray, isProtobuf: Boolean): List<String> {
-        if (content.isEmpty()) return emptyList()
-        return if (isProtobuf) extractDevicesFromProtobuf(content) else extractDevicesFromText(content)
-    }
-
-    /** `pre-device=<value>` line; value may itself be a `|`-joined list of devices. */
-    private fun extractDevicesFromText(content: ByteArray): List<String> {
-        val text = content.toString(StandardCharsets.UTF_8)
-        for (line in text.lineSequence()) {
+    private fun parseText(content: ByteArray): PackageInfo {
+        var devices = emptyList<String>()
+        var buildIncremental: String? = null
+        var fingerprintBuild: String? = null
+        for (line in content.toString(StandardCharsets.UTF_8).lineSequence()) {
             val trimmed = line.trim()
-            if (!trimmed.startsWith("pre-device")) continue
             val value = trimmed.substringAfter('=', missingDelimiterValue = "").trim()
-            val devices = splitDevices(value)
-            if (devices.isNotEmpty()) return devices
+            when (trimmed.substringBefore('=').trimEnd()) {
+                "pre-device" -> if (devices.isEmpty()) devices = splitDevices(value)
+                "post-build-incremental" -> buildIncremental = value.takeIf(buildIdentifier::matches)
+                "post-build" -> fingerprintBuild = buildFromFingerprints(value.split(DEVICE_SEPARATOR))
+            }
         }
-        return emptyList()
+        return PackageInfo(devices, buildIncremental ?: fingerprintBuild)
     }
 
-    /**
-     * `precondition.device` (repeated). A malformed payload is not "parsed successfully": it is
-     * logged and yields no device. `pre-device` is preferred; `postcondition.device` is only a
-     * fallback for packages whose precondition is empty.
-     */
-    private fun extractDevicesFromProtobuf(content: ByteArray): List<String> {
+    private fun parseProtobuf(content: ByteArray): PackageInfo? {
         val metadata = try {
             OtaPackageMetadata.OtaMetadata.parseFrom(content)
         } catch (e: InvalidProtocolBufferException) {
             logInfo("Malformed metadata.pb: ${e.message}")
-            return emptyList()
+            return null
         }
-        val precondition = metadata.precondition.deviceList.flatMap { splitDevices(it) }
-        if (precondition.isNotEmpty()) return precondition
-        return metadata.postcondition.deviceList.flatMap { splitDevices(it) }
+        val target = metadata.postcondition
+        val devices = metadata.precondition.deviceList.flatMap(::splitDevices)
+            .ifEmpty { target.deviceList.flatMap(::splitDevices) }
+        val build = target.buildIncremental.trim().takeIf(buildIdentifier::matches)
+            ?: buildFromFingerprints(target.buildList)
+        return PackageInfo(devices, build)
     }
+
+    private fun buildFromFingerprints(fingerprints: List<String>): String? =
+        fingerprints.firstNotNullOfOrNull { fingerprint ->
+            // brand/product/device:release/build-id/incremental:type/tags
+            val incremental = fingerprint.substringAfter(':', "").split('/').getOrNull(2)
+                ?.substringBefore(':')
+            incremental?.takeIf(buildIdentifier::matches)
+        }
 
     private fun splitDevices(value: String): List<String> =
         value.split(DEVICE_SEPARATOR).map { it.trim() }.filter { it.isNotEmpty() }.distinct()
@@ -229,15 +213,6 @@ object OtaMetadataParser {
         }
         return out.toByteArray()
     }
-
-    private fun le16(bytes: ByteArray, offset: Int): Int =
-        (bytes[offset].toInt() and 0xFF) or ((bytes[offset + 1].toInt() and 0xFF) shl 8)
-
-    private fun le32(bytes: ByteArray, offset: Int): Long =
-        (bytes[offset].toLong() and 0xFF) or
-            ((bytes[offset + 1].toLong() and 0xFF) shl 8) or
-            ((bytes[offset + 2].toLong() and 0xFF) shl 16) or
-            ((bytes[offset + 3].toLong() and 0xFF) shl 24)
 
     private fun logInfo(message: String) {
         runCatching { Log.i(TAG, message) }

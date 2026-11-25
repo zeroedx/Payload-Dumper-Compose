@@ -15,6 +15,30 @@ object ZipFileUtil {
     private const val ZIP64_LOCHDR = 20
     private const val ZIP64_MAGICVAL = 0xFFFFFFFFL
 
+    internal suspend fun readCentralDirectory(input: SeekableInput): ByteArray? {
+        val fileLength = input.length()
+        val tailSize = minOf(4096L, fileLength)
+        if (tailSize < ENDHDR) return null
+        val tailStart = fileLength - tailSize
+        val tail = ByteArray(tailSize.toInt())
+        input.seek(tailStart)
+        input.readFully(tail)
+        val info = locateCentralDirectory(tail, fileLength)
+        if (info.offset < 0 || info.size !in 1..Int.MAX_VALUE.toLong() ||
+            info.size > fileLength - info.offset
+        ) return null
+
+        if (info.offset >= tailStart) {
+            val start = (info.offset - tailStart).toInt()
+            return tail.copyOfRange(start, start + info.size.toInt())
+        }
+
+        val directory = ByteArray(info.size.toInt())
+        input.seek(info.offset)
+        input.readFully(directory)
+        return directory
+    }
+
     fun locateCentralDirectory(byteArray: ByteArray, fileLength: Long): FileInfo {
         val byteBuffer = ByteBuffer.wrap(byteArray).order(ByteOrder.LITTLE_ENDIAN)
         val offset = byteBuffer.capacity() - ENDHDR
@@ -56,50 +80,16 @@ object ZipFileUtil {
     }
 
     fun locateLocalFileHeader(byteArray: ByteArray, fileName: String): Long {
-        val byteBuffer = ByteBuffer.wrap(byteArray).order(ByteOrder.LITTLE_ENDIAN)
-        var localHeaderOffset: Long = -1
-
-        // Guard every read against the buffer end: a malformed or truncated central directory
-        // must yield -1 (entry not found) rather than a BufferUnderflowException.
-        while (byteBuffer.remaining() >= 46) {
-            if (byteBuffer.getInt().toLong() == CENSIG) {
-                byteBuffer.position(byteBuffer.position() + 24)
-                val fileNameLength = byteBuffer.getShort().toUInt().toInt()
-                val extraFieldLength = byteBuffer.getShort().toUInt().toInt()
-                val fileCommentLength = byteBuffer.getShort().toUInt().toInt()
-                byteBuffer.position(byteBuffer.position() + 8)
-                val localHeaderOffsetTemp = byteBuffer.getInt().toUInt().toLong()
-                if (fileNameLength < 0 || byteBuffer.remaining() < fileNameLength + extraFieldLength + fileCommentLength) {
-                    break
-                }
-                val fileNameBytes = ByteArray(fileNameLength)
-                byteBuffer.get(fileNameBytes)
-                if (fileName == String(fileNameBytes, Charsets.UTF_8)) {
-                    localHeaderOffset = localHeaderOffsetTemp
-                    break
-                }
-                byteBuffer.position(byteBuffer.position() + extraFieldLength + fileCommentLength)
-            } else {
-                break
-            }
-        }
-
-        return localHeaderOffset
+        return locateCentralDirectoryEntry(byteArray, fileName)?.localHeaderOffset ?: -1L
     }
 
     fun locateLocalFileOffset(byteArray: ByteArray): Long {
+        if (byteArray.size < 30) return -1
         val byteBuffer = ByteBuffer.wrap(byteArray).order(ByteOrder.LITTLE_ENDIAN)
-        var localFileOffset: Long = -1
-
-        if (byteBuffer.getInt().toLong() == LOCSIG) {
-            byteBuffer.position(byteBuffer.position() + 22)
-            val fileNameLength = byteBuffer.getShort().toUInt().toInt()
-            val extraFieldLength = byteBuffer.getShort().toUInt().toInt()
-            byteBuffer.position(byteBuffer.position() + fileNameLength + extraFieldLength)
-            localFileOffset = byteBuffer.position().toLong()
-        }
-
-        return localFileOffset
+        if (byteBuffer.int.toLong() != LOCSIG) return -1
+        val fileNameLength = byteBuffer.getShort(26).toUShort().toInt()
+        val extraFieldLength = byteBuffer.getShort(28).toUShort().toInt()
+        return 30L + fileNameLength + extraFieldLength
     }
 
     /**
@@ -125,31 +115,28 @@ object ZipFileUtil {
     ): CentralDirectoryEntry? {
         val byteBuffer = ByteBuffer.wrap(byteArray).order(ByteOrder.LITTLE_ENDIAN)
 
+        val name = fileName.toByteArray(Charsets.UTF_8)
         while (byteBuffer.remaining() >= 46) {
             if (byteBuffer.getInt().toLong() != CENSIG) break
             byteBuffer.position(byteBuffer.position() + 4) // version made by + version needed
             byteBuffer.position(byteBuffer.position() + 2) // general purpose flags
-            val method = byteBuffer.getShort().toUInt().toInt()
+            val method = byteBuffer.getShort().toUShort().toInt()
             byteBuffer.position(byteBuffer.position() + 8) // mod time + date + crc32
             val compressedSize = byteBuffer.getInt().toUInt().toLong()
             byteBuffer.position(byteBuffer.position() + 4) // uncompressed size
-            val fileNameLength = byteBuffer.getShort().toUInt().toInt()
-            val extraFieldLength = byteBuffer.getShort().toUInt().toInt()
-            val fileCommentLength = byteBuffer.getShort().toUInt().toInt()
+            val fileNameLength = byteBuffer.getShort().toUShort().toInt()
+            val extraFieldLength = byteBuffer.getShort().toUShort().toInt()
+            val fileCommentLength = byteBuffer.getShort().toUShort().toInt()
             byteBuffer.position(byteBuffer.position() + 8) // disk + internal + external attrs
             val localHeaderOffset = byteBuffer.getInt().toUInt().toLong()
 
-            if (fileNameLength < 0 ||
-                byteBuffer.remaining() < fileNameLength + extraFieldLength + fileCommentLength
-            ) {
-                break
-            }
-            val fileNameBytes = ByteArray(fileNameLength)
-            byteBuffer.get(fileNameBytes)
-            if (fileName == String(fileNameBytes, Charsets.UTF_8)) {
+            val entrySize = fileNameLength + extraFieldLength + fileCommentLength
+            if (entrySize > byteBuffer.remaining()) break
+            val nameStart = byteBuffer.position()
+            if (fileNameLength == name.size && name.indices.all { name[it] == byteArray[nameStart + it] }) {
                 return CentralDirectoryEntry(localHeaderOffset, method, compressedSize)
             }
-            byteBuffer.position(byteBuffer.position() + extraFieldLength + fileCommentLength)
+            byteBuffer.position(nameStart + entrySize)
         }
 
         return null
